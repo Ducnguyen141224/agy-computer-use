@@ -1,0 +1,113 @@
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { createHash, randomUUID } from 'node:crypto';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+execFileSync('dotnet', ['build', 'tests/fixture/DesktopFixture.csproj', '-c', 'Release', '--nologo'], { cwd: root, stdio: 'pipe', windowsHide: true });
+const title = `AGY workflow ${randomUUID()}`;
+const fixture = spawn(fileURLToPath(new URL('../tests/fixture/bin/Release/net10.0-windows/DesktopFixture.exe', import.meta.url)), [title], { stdio: 'ignore' });
+const client = new Client({ name: 'workflow-smoke', version: '0.4.0' });
+const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+let checks = 0, baselineBytes = 0, baselineRequestBytes = 0, baselineCalls = 0;
+const check = (value, message) => { assert.ok(value, message); checks++; process.stdout.write(`PASS ${message}\n`); };
+try {
+  await client.connect(transport);
+  const call = async (name, args, failure = false, measure = false) => {
+    const reply = await client.callTool({ name, arguments: args }); const text = reply.content[0].text; const data = JSON.parse(text);
+    const request_bytes = Buffer.byteLength(JSON.stringify({ name, arguments: args }));
+    if (measure) { baselineBytes += Buffer.byteLength(text); baselineRequestBytes += request_bytes; baselineCalls++; }
+    if (!failure) assert.equal(reply.isError, false, text);
+    return { ...data, request_bytes, wire_bytes: Buffer.byteLength(text), image_blocks: reply.content.filter(item => item.type === 'image') };
+  };
+  const fingerprint = async () => createHash('sha256').update(JSON.stringify((await client.listTools()).tools)).digest('hex');
+  const catalog = await fingerprint();
+  const resources = await client.listResources();
+  check(resources.resources.length === 10 && (await client.readResource({ uri: 'agy://guides/runtime' })).contents[0].text.includes('QuickJS'), 'MCP resources disclose a single requested guide without loading every guide into the prompt');
+  const window_id = (await call('desktop_query', { operation: 'window_wait', query: title, timeout_ms: 5000 })).windows.find(item => item.pid === fixture.pid).id;
+  await call('desktop_help', { topic: 'runtime' });
+  await call('desktop_context', { operation: 'update', goal: 'Save a disposable fixture message', constraints: ['Operate only the nonce-named fixture', 'Keep all state in RAM'], next_step: 'Find Message and Save, verify the resulting Status' });
+  const baselineText = 'Baseline Unicode tiếng Việt';
+  const find = async (name, role) => (await call('desktop_find', { window_id, name, role }, false, true)).items[0].ref;
+  const message = await find('Message', 'edit'); const save = await find('Save', 'button'); const status = await find('Status', 'edit');
+  await call('desktop_act', { action: 'set_value', ref: message, text: baselineText, expect: { property: 'value', equals: baselineText } }, false, true);
+  await call('desktop_act', { action: 'click', ref: save, expect: { ref: status, property: 'value', equals: 'Saved: ' + baselineText } }, false, true);
+  await call('desktop_query', { operation: 'get', ref: status, property: 'value' }, false, true);
+  const scriptedText = 'Workflow Unicode tiếng Việt';
+  const saved = await call('desktop_run', { code: `
+    state.window = ${JSON.stringify(window_id)};
+    state.field = desktop.one(desktop.find({window_id:state.window,name:'Message',role:'edit'})).ref;
+    const save = desktop.one(desktop.find({window_id:state.window,name:'Save',role:'button'})).ref;
+    state.status = desktop.one(desktop.find({window_id:state.window,name:'Status',role:'edit'})).ref;
+    desktop.act({action:'set_value',ref:state.field,text:${JSON.stringify(scriptedText)},expect:{property:'value',equals:${JSON.stringify(scriptedText)}}});
+    desktop.act({action:'click',ref:save,expect:{ref:state.status,property:'value',equals:${JSON.stringify('Saved: ' + scriptedText)}}});
+    const actual=desktop.query({operation:'get',ref:state.status,property:'value'}).value;
+    state.counter=1; return {saved:actual===${JSON.stringify('Saved: ' + scriptedText)}};
+  ` });
+  check(saved.result.saved && saved.steps === 6, 'one runtime call finds fresh refs, performs real actions and verifies the asynchronous rendered result');
+  check((await call('desktop_query', { operation: 'get', ref: status, property: 'value' })).value === 'Saved: ' + scriptedText, 'an independent MCP query confirms the actual saved fixture state');
+  check(saved.wire_bytes < baselineBytes && baselineCalls === 6, 'selected workflow output is smaller than six equivalent direct MCP results on this fixture');
+  process.stdout.write(`Payload measurement (not model tokens): direct=${baselineBytes} UTF-8 bytes/${baselineCalls} calls, workflow=${saved.wire_bytes} bytes/1 call; native steps=${saved.steps}.\n`);
+  process.stdout.write(`Request+response JSON bytes (no schema/history/image tokens): direct=${baselineRequestBytes + baselineBytes}, workflow=${saved.request_bytes + saved.wire_bytes}.\n`);
+  check((await call('desktop_run', { code: 'state.counter++; return {counter:state.counter, value:desktop.query({operation:"get",ref:state.field,property:"value"}).value};' })).result.counter === 2, 'guest variables and guarded native refs survive a successful second run');
+  const imageRun = await call('desktop_run', { code: 'state.image=desktop.capture({window_id:state.window,max_dimension:200}); return {id:state.image.capture_id,bytesAvailable:state.image.image!==undefined};' });
+  check(imageRun.image_blocks.length === 1 && !imageRun.result.bytesAvailable && imageRun.result.id, 'runtime capture emits a real image block while keeping image bytes out of guest state and text');
+  const originalSession = (await call('desktop_session', { operation: 'info' })).session_id;
+  const newSession = await call('desktop_session', { operation: 'start' });
+  check((await call('desktop_run', { code: 'return {missing:state.counter===undefined};' })).result.missing, 'a new desktop session has a separate guest namespace');
+  check((await call('desktop_context', { operation: 'read' })).goal === '', 'task notes do not leak into another desktop session');
+  await call('desktop_session', { operation: 'switch', session_id: originalSession });
+  check((await call('desktop_run', { code: 'return state.counter;' })).result === 2, 'switching back restores the original runtime namespace');
+  check((await call('desktop_context', { operation: 'compact' })).constraints.length === 2, 'compact context retains task intent, constraints and actual verified conditions');
+  const halted = await call('desktop_run', { code: `try { desktop.act({action:'set_value',ref:state.field,text:'Changed once',expect:{property:'value',equals:'Impossible nonce'},timeout_ms:0}); } catch(e) {} try { desktop.act({action:'set_value',ref:state.field,text:'Must not write'}); } catch(e) {} return {pretendSuccess:true};` }, true);
+  check(halted.verification === 'failed' && halted.steps === 1 && halted.runtime_reset, 'a caught failed postcondition still halts every subsequent desktop step');
+  check((await call('desktop_context', { operation: 'reconcile', recovery_note: 'No read yet' }, true)).error.code === 'FRESH_READ_REQUIRED', 'reconciliation refuses a note without a fresh post-failure UI read');
+  const blocked = await call('desktop_run', { code: `desktop.act({action:'set_value',ref:${JSON.stringify(message)},text:'Must not retry'});` }, true);
+  check(blocked.error.code === 'RECONCILIATION_REQUIRED', 'a new runtime cannot bypass unresolved action delivery');
+  check((await call('desktop_query', { operation: 'get', ref: message, property: 'value' })).value === 'Changed once', 'live control confirms the refused follow-up actions were never delivered');
+  await call('desktop_context', { operation: 'reconcile', recovery_note: 'Fresh query confirms Changed once; do not repeat the failed action.' });
+  check(!(await call('desktop_context', { operation: 'read' })).unresolved_action, 'explicit reconciliation clears the resume guard after the actual read');
+  const isolated = await call('desktop_run', { code: 'return {process:typeof process,require:typeof require,fetch:typeof fetch,webAssembly:typeof WebAssembly,hostFromFunction:Function("return typeof process")()};' });
+  check(Object.values(isolated.result).every(value => value === 'undefined'), 'guest code and Function constructors have no Node, filesystem/network globals or nested WebAssembly');
+  const timed = await call('desktop_run', { code: 'while(true){}', timeout_ms: 120 }, true);
+  check(timed.verification === 'failed' && timed.replayed_actions === 0, 'an infinite loop is interrupted without replaying input');
+  await call('desktop_act', { action: 'set_value', ref: message, text: 'Lease released', expect: { property: 'value', equals: 'Lease released' } });
+  check((await call('desktop_query', { operation: 'get', ref: message, property: 'value' })).value === 'Lease released', 'native input lease is released after runtime interruption');
+  await call('desktop_session', { operation: 'end', session_id: newSession.session_id });
+  const competitor = new Client({ name: 'competing-helper-smoke', version: '0.4.0' });
+  const secondTransport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+  try {
+    await competitor.connect(secondTransport);
+    const competingCall = async (name, args) => { const reply = await competitor.callTool({ name, arguments: args }); return { error: reply.isError, data: JSON.parse(reply.content[0].text) }; };
+    const secondWindow = (await competingCall('desktop_windows', { query: title })).data.windows.find(item => item.pid === fixture.pid).id;
+    const secondField = (await competingCall('desktop_find', { window_id: secondWindow, name: 'Message', role: 'edit' })).data.items[0].ref;
+    const holding = call('desktop_run', { code: `desktop.act({action:'set_value',ref:${JSON.stringify(message)},text:'Lease held',expect:{property:'value',equals:'Lease held'}}); desktop.query({operation:'time_wait',timeout_ms:3500}); return {released:true};`, timeout_ms: 6000 });
+    let seen = false;
+    for (let i = 0; i < 20; i++) { const live = await competingCall('desktop_query', { operation: 'get', ref: secondField, property: 'value' }); if (live.data.value === 'Lease held') { seen = true; break; } await new Promise(resolve => setTimeout(resolve, 30)); }
+    assert.ok(seen, 'Waited on the real running workflow mutation before testing contention.');
+    const blocked = await competingCall('desktop_act', { action: 'set_value', ref: secondField, text: 'Must not interleave' });
+    check(blocked.error && blocked.data.error.code === 'INPUT_BUSY', 'a second native helper cannot interleave input while the workflow owns its lease');
+    await holding;
+    const afterContention = (await call('desktop_query', { operation: 'get', ref: message, property: 'value' })).value;
+    assert.equal(afterContention, 'Lease held', 'Unexpected disposable fixture value after contention');
+    check(true, 'the actual control confirms the competing helper sent no mutation');
+    const cancelled = new AbortController();
+    const inflight = client.callTool({ name: 'desktop_run', arguments: { code: `state.cancelled='must disappear'; desktop.act({action:'set_value',ref:${JSON.stringify(message)},text:'Cancel started',expect:{property:'value',equals:'Cancel started'}}); desktop.query({operation:'time_wait',timeout_ms:5000}); desktop.act({action:'set_value',ref:${JSON.stringify(message)},text:'Must not execute after cancel'});`, timeout_ms: 10000 } }, undefined, { signal: cancelled.signal });
+    const observedCancellation = inflight.then(() => false, () => true);
+    let cancellationStarted = false;
+    for (let i = 0; i < 20; i++) { const live = await competingCall('desktop_query', { operation: 'get', ref: secondField, property: 'value' }); if (live.data.value === 'Cancel started') { cancellationStarted = true; break; } await new Promise(resolve => setTimeout(resolve, 30)); }
+    assert.ok(cancellationStarted, 'Cancellation is tested only after the workflow has actually sent its first mutation.');
+    cancelled.abort(); check(await observedCancellation, 'MCP cancellation interrupts a verified live workflow');
+    const inventory = await call('desktop_windows', { query: title }); const freshWindow = inventory.windows.find(item => item.pid === fixture.pid).id;
+    const freshField = (await call('desktop_find', { window_id: freshWindow, name: 'Message', role: 'edit' })).items[0].ref;
+    check((await call('desktop_query', { operation: 'get', ref: freshField, property: 'value' })).value === 'Cancel started', 'helper cancellation preserves the first UI effect and never sends the queued second mutation');
+    const recovery = await call('desktop_context', { operation: 'read' });
+    check(recovery.goal === 'Save a disposable fixture message' && recovery.unresolved_action, 'helper restart preserves compact task intent and unresolved delivery while invalidating live refs');
+    await call('desktop_context', { operation: 'reconcile', recovery_note: 'Fresh field confirms Cancel started; no second mutation was received.' });
+    check((await call('desktop_run', { code: 'return {discarded:state.cancelled===undefined};' })).result.discarded, 'cancelled guest variables are not restored into the new native generation');
+  } finally { await competitor.close().catch(() => {}); }
+  check(await fingerprint() === catalog, 'loading guides and running workflows leaves tool schemas and enumeration order unchanged');
+  process.stdout.write(`Workflow desktop smoke passed: ${checks} checks. No model-token savings claimed, no evidence saved.\n`);
+} finally { await client.close().catch(() => {}); fixture.kill(); }

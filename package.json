@@ -1,0 +1,42 @@
+{
+  "name": "agy-computer-use",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agy-desktop": "src/cli.mjs"
+  },
+  "description": "Memory-only Windows computer use MCP server for Antigravity",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "dotnet build native/AgyComputerUse.csproj -c Release --nologo",
+    "build:ffi": "powershell.exe -NoProfile -File scripts/build-ffi.ps1",
+    "build:plugin": "node scripts/build-plugin.mjs",
+    "start": "node src/server.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:regression": "node scripts/regression.mjs",
+    "test:workflow": "node scripts/workflow-smoke.mjs",
+    "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:advanced": "node scripts/advanced-smoke.mjs",
+    "test:providers": "node scripts/provider-smoke.mjs",
+    "test:notifications": "dotnet build tests/fixture/DesktopFixture.csproj -c Release --nologo && dotnet run --project tests/notifications/NotificationSmoke.csproj -c Release -- .",
+    "test:shell-notifications": "dotnet run --project tests/notifications/NotificationSmoke.csproj -c Release -- . --shell",
+    "test:capture": "node scripts/capture-smoke.mjs",
+    "test:drag": "node scripts/drag-smoke.mjs",
+    "test:presentation": "node scripts/presentation-smoke.mjs",
+    "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
+    "test:cdp": "dotnet run --project tests/cdp/CdpSmoke.csproj -c Release --",
+    "test:launch": "node scripts/launch-smoke.mjs",
+    "test:cli": "node scripts/cli-smoke.mjs",
+    "test:shell": "node scripts/shell-smoke.mjs",
+    "test:ffi": "dotnet run --project tests/ffi/FfiSmoke.csproj -c Release -- .",
+    "test:setup": "node scripts/setup-smoke.mjs",
+    "test:plugin": "node scripts/plugin-smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "quickjs-emscripten": "0.32.0"
+  }
+}

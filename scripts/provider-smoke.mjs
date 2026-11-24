@@ -1,0 +1,95 @@
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+execFileSync('dotnet', ['build', 'tests/fixture/DesktopFixture.csproj', '-c', 'Release', '--nologo'], { cwd: root, stdio: 'pipe', windowsHide: true });
+const title = `AGY WPF ${Date.now()}`;
+const fixture = spawn(fileURLToPath(new URL('../tests/fixture/bin/Release/net10.0-windows/DesktopFixture.exe', import.meta.url)), [title, '--wpf'], { windowsHide: false, stdio: 'ignore' });
+const client = new Client({ name: 'agy-provider-smoke', version: '0.2.0' });
+const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+let checks = 0;
+function check(condition, description) { assert.ok(condition, description); checks++; process.stdout.write(`PASS ${description}\n`); }
+async function call(name, args) {
+  const reply = await client.callTool({ name, arguments: args });
+  const data = JSON.parse(reply.content[0].text);
+  assert.equal(reply.isError, false, JSON.stringify(data));
+  return data;
+}
+try {
+  await client.connect(transport);
+  const appeared = await call('desktop_query', { operation: 'window_wait', query: title, timeout_ms: 5000 });
+  const window_id = appeared.windows.find(window => window.pid === fixture.pid).id;
+  const find = async (name, role) => {
+    const result = await call('desktop_find', { window_id, name, ...(role ? { role } : {}), budget_ms: 5000 });
+    assert.equal(result.items.length, 1, name);
+    return result.items[0].ref;
+  };
+  const query = args => call('desktop_query', args);
+  const act = args => call('desktop_act', args);
+  const list = await find('WPF Choices', 'list');
+  const first = await find('Item 01', 'listitem');
+  const last = await find('Item 60', 'listitem');
+  check((await query({ operation: 'get', ref: last, property: 'offscreen' })).value === true, 'reads a real offscreen WPF list item');
+  await act({ action: 'scroll_into_view', ref: last });
+  check((await query({ operation: 'wait', ref: last, property: 'offscreen', equals: false, timeout_ms: 2000 })).matches, 'ScrollItemPattern brings the requested offscreen item into view');
+  await act({ action: 'select', ref: last, expect: { property: 'selected', equals: true } });
+  check((await query({ operation: 'is', ref: last, property: 'selected', equals: true })).matches, 'SelectionItemPattern selects the real requested item');
+  check((await query({ operation: 'get', ref: list, property: 'selected_items' })).value.some(item => item.name === 'Item 60'), 'SelectionPattern reads back actual selected items with refs');
+  const before = (await query({ operation: 'get', ref: list, property: 'scroll_vertical' })).value;
+  await act({ action: 'scroll', ref: list, direction: 'up', amount: 'large' });
+  const after = (await query({ operation: 'get', ref: list, property: 'scroll_vertical' })).value;
+  check(after < before, 'ScrollPattern changes the actual vertical scroll percentage');
+  await act({ action: 'scroll_into_view', ref: first });
+  check((await query({ operation: 'get', ref: first, property: 'offscreen' })).value === false, 'scroll-into-view also works in the opposite direction');
+  const parent = await find('Parent', 'treeitem');
+  const structure = await query({ operation: 'watch', event: 'structure_changed', window_id });
+  await act({ action: 'expand', ref: parent, expect: { property: 'expanded', equals: 'expanded' } });
+  const child = await find('Child', 'treeitem');
+  check((await query({ operation: 'get', ref: child, property: 'offscreen' })).value === false, 'expand exposes a real child tree item');
+  check((await query({ operation: 'wait_event', token: structure.token, timeout_ms: 3000 })).verification === 'passed', 'structure watch receives the actual expanded-tree change');
+  await act({ action: 'collapse', ref: parent, expect: { property: 'expanded', equals: 'collapsed' } });
+  check((await query({ operation: 'get', ref: parent, property: 'expanded' })).value === 'collapsed', 'collapse reads back its semantic state');
+  const checkbox = await find('WPF Toggle', 'checkbox');
+  await act({ action: 'toggle', ref: checkbox });
+  check((await query({ operation: 'get', ref: checkbox, property: 'checked' })).value === true, 'toggle changes a WPF checkbox state');
+  await act({ action: 'uncheck', ref: checkbox, expect: { property: 'checked', equals: false } });
+  const field = await find('WPF Message', 'edit');
+  check((await query({ operation: 'get', ref: field, property: 'text' })).value === 'Provider text', 'reads document text through the WPF provider');
+  check((await query({ operation: 'get', ref: field, property: 'readonly' })).value === false, 'reads the field readonly property');
+  const byNativeId = await call('desktop_find', { window_id, automation_id: 'fixture-message', role: 'textbox', states: { readonly: false, enabled: true } });
+  check(byNativeId.items.length === 1 && byNativeId.items[0].name === 'WPF Message', 'find combines native id, role aliases and real provider states');
+  const byDescription = await call('desktop_find', { window_id, description: 'Disposable fixture message', role: 'edit' });
+  check(byDescription.items.length === 1, 'find searches the actual accessible description');
+  const byText = await call('desktop_find', { window_id, text: 'Provider text', role: 'edit' });
+  check(byText.items.length === 1, 'find reads and matches rendered document text');
+  const nativeClass = (await query({ operation: 'get', ref: field, property: 'class_name' })).value;
+  check((await call('desktop_find', { window_id, class_name: nativeClass, automation_id: 'fixture-message' })).items.length === 1, 'find can narrow by the exact provider class');
+  const pattern = await query({ operation: 'get', ref: field, property: 'actions' });
+  check(pattern.value.length > 0, 'reports actual supported automation patterns');
+  const size = await find('WPF Size', 'combobox');
+  await act({ action: 'select', ref: size, option: 'Medium' });
+  check((await query({ operation: 'get', ref: size, property: 'selected_items' })).value.some(item => item.name === 'Medium'), 'selects the exact display option in a real WPF combobox');
+  check((await act({ action: 'select', ref: size, option: 'Medium' })).delivery === 'already_satisfied', 'repeating an already selected combobox value sends no selection');
+  const triState = await find('WPF Tri-state', 'checkbox');
+  const indeterminate = await call('desktop_find', { window_id, name: 'WPF Tri-state', role: 'checkbox', states: { indeterminate: true } });
+  check(indeterminate.items.length === 1, 'find reads the actual indeterminate checkbox state');
+  await act({ action: 'check', ref: triState, expect: { property: 'checked', equals: true } });
+  check((await query({ operation: 'get', ref: triState, property: 'checked' })).value === true, 'check follows verified tri-state transitions to the requested on state');
+  await act({ action: 'uncheck', ref: triState, expect: { property: 'checked', equals: false } });
+  check((await call('desktop_find', { window_id, name: 'WPF Tri-state', role: 'checkbox', states: { indeterminate: false, checked: false } })).items.length === 1, 'uncheck reaches off rather than stopping at indeterminate');
+  const slider = await find('WPF Level', 'slider');
+  await act({ action: 'set_value', ref: slider, text: '60', expect: { property: 'value', equals: '60' } });
+  check((await query({ operation: 'get', ref: slider, property: 'value' })).value === '60', 'RangeValuePattern sets and verifies a real numeric slider without pointer guessing');
+  check((await act({ action: 'set_value', ref: slider, text: '60' })).delivery === 'already_satisfied', 'numeric slider setting is idempotent');
+  check((await call('desktop_find', { window_id, root_ref: list, role: 'listitem', pick: 'count' })).match_count === 60, 'count reads all sixty real list items within its complete scope');
+  check((await call('desktop_find', { window_id, root_ref: list, role: 'listitem', pick: 'last' })).items[0].name === 'Item 60', 'last returns the final match after a complete scoped search');
+  check((await call('desktop_find', { window_id, root_ref: list, role: 'listitem', pick: 'nth', index: 3 })).items[0].name === 'Item 04', 'nth selects the explicit zero-based index');
+  check((await call('desktop_find', { window_id, role: 'slider', value: '60' })).items.length === 1, 'value filter matches the actual numeric provider value');
+  process.stdout.write(`Provider desktop smoke passed: ${checks} checks. No evidence files saved.\n`);
+} finally {
+  await client.close().catch(() => {});
+  fixture.kill();
+}

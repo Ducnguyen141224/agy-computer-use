@@ -1,0 +1,19 @@
+node_modules/
+native/bin/
+native/obj/
+tests/fixture/bin/
+tests/fixture/obj/
+*.user
+.tools/
+ffi/bin/
+tests/ffi/bin/
+tests/ffi/obj/
+tests/notifications/bin/
+tests/notifications/obj/
+tests/uia3/bin/
+tests/uia3/obj/
+tests/cdp/bin/
+tests/cdp/obj/
+plugin/
+antigravity.mcp.json
+NVIDIA Corporation/

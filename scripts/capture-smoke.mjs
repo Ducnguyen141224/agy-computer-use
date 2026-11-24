@@ -1,0 +1,75 @@
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { pixel } from '../tests/png.mjs';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+execFileSync('dotnet', ['build', 'tests/fixture/DesktopFixture.csproj', '-c', 'Release', '--nologo'], { cwd: root, stdio: 'pipe', windowsHide: true });
+const executable = fileURLToPath(new URL('../tests/fixture/bin/Release/net10.0-windows/DesktopFixture.exe', import.meta.url));
+const title = `AGY Capture ${Date.now()}`;
+const target = spawn(executable, [title], { windowsHide: false, stdio: 'ignore' });
+let overlay;
+const client = new Client({ name: 'agy-capture-smoke', version: '0.2.0' });
+const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+let checks = 0;
+const check = (condition, description) => { assert.ok(condition, description); checks++; process.stdout.write(`PASS ${description}\n`); };
+async function call(name, args, expectError = false) {
+  const reply = await client.callTool({ name, arguments: args });
+  const data = JSON.parse(reply.content[0].text);
+  if (!expectError) assert.equal(reply.isError, false, JSON.stringify(data));
+  return { ...data, image: reply.content.find(block => block.type === 'image')?.data };
+}
+try {
+  await client.connect(transport);
+  const appeared = await call('desktop_query', { operation: 'window_wait', query: title, timeout_ms: 5000 });
+  const window_id = appeared.windows.find(window => window.pid === target.pid).id;
+  const found = await call('desktop_find', { window_id, name: 'Gesture pad', include_bounds: true });
+  const pad = found.items[0].bounds;
+  const region = { x: pad.x + 12, y: pad.y + pad.height - 28, width: 16, height: 16 };
+  const original = await call('desktop_system', { operation: 'window_info', window_id });
+  await call('desktop_system', { operation: 'focus_window', window_id });
+  const first = await call('desktop_capture', { window_id, region });
+  const before = pixel(first.image, 4, 4);
+  check(before[2] > 230 && before[1] > 230, 'window capture contains the actual colored fixture region');
+  overlay = spawn(executable, [title + ' Overlay', '--overlay'], { windowsHide: false, stdio: 'ignore' });
+  const opened = await call('desktop_query', { operation: 'window_wait', query: title + ' Overlay', timeout_ms: 5000 });
+  const overlay_id = opened.windows.find(window => window.pid === overlay.pid).id;
+  await call('desktop_system', { operation: 'move', window_id: overlay_id, x: original.bounds.x, y: original.bounds.y });
+  await call('desktop_system', { operation: 'focus_window', window_id: overlay_id });
+  check(!(await call('desktop_system', { operation: 'window_info', window_id })).foreground, 'target remains behind a different foreground window');
+  const occluded = await call('desktop_capture', { window_id, region });
+  const behind = pixel(occluded.image, 4, 4);
+  check(occluded.mode === 'window' && before.every((component, index) => Math.abs(component - behind[index]) <= 2), 'Windows.Graphics.Capture preserves target pixels when fully occluded');
+  await call('desktop_system', { operation: 'focus_window', window_id: overlay_id });
+  const visible = await call('desktop_capture', { window_id: overlay_id, region, mode: 'screen' });
+  const front = pixel(visible.image, 4, 4);
+  check(front[0] > 230 && front[2] > 230 && front[1] < 20, 'screen capture sees the magenta covering window instead');
+  const refused = await call('desktop_act', { action: 'click_point', window_id, capture_id: occluded.capture_id, x: 4, y: 4 }, true);
+  check(refused.error?.code === 'WINDOW_NOT_FOREGROUND', 'background capture does not authorize physical input into a covered target');
+  const displays = await call('desktop_system', { operation: 'list_displays' });
+  const information = await call('desktop_system', { operation: 'window_info', window_id: overlay_id });
+  const screenX = information.bounds.x + Math.floor(information.bounds.width / 2);
+  const screenY = information.bounds.y + Math.floor(information.bounds.height / 2);
+  const display = displays.displays.find(item => screenX >= item.bounds.x && screenX < item.bounds.x + item.bounds.width && screenY >= item.bounds.y && screenY < item.bounds.y + item.bounds.height);
+  const taps = await call('desktop_find', { window_id: overlay_id, name: 'Overlay taps', role: 'edit' });
+  assert.equal(taps.items.length, 1);
+  const displayImage = await call('desktop_capture', { display_id: display.id, max_dimension: 1000 });
+  const imageX = Math.floor((screenX - display.bounds.x) * displayImage.width / displayImage.source_region.width);
+  const imageY = Math.floor((screenY - display.bounds.y) * displayImage.height / displayImage.source_region.height);
+  const displayPixel = pixel(displayImage.image, imageX, imageY);
+  check(displayImage.mode === 'display' && displayPixel[0] > 230 && displayPixel[2] > 230 && displayPixel[1] < 20, 'full-display capture contains actual visible screen pixels with the returned mapping');
+  await call('desktop_act', { action: 'click_point', window_id: overlay_id, capture_id: displayImage.capture_id, x: imageX, y: imageY, expect: { ref: taps.items[0].ref, property: 'value', equals: '1' } });
+  check((await call('desktop_query', { operation: 'get', ref: taps.items[0].ref, property: 'value' })).value === '1', 'display-image coordinates drive only the explicitly selected foreground window');
+  const reusedDisplay = await call('desktop_act', { action: 'click_point', window_id: overlay_id, capture_id: displayImage.capture_id, x: imageX, y: imageY }, true);
+  check(reusedDisplay.error?.code === 'STALE_CAPTURE', 'a full-display capture is also single-use');
+  const staleDisplay = await call('desktop_capture', { display_id: display.id, max_dimension: 1000 });
+  await call('desktop_system', { operation: 'move', window_id: overlay_id, x: information.bounds.x + 10, y: information.bounds.y });
+  const moved = await call('desktop_act', { action: 'click_point', window_id: overlay_id, capture_id: staleDisplay.capture_id, x: imageX, y: imageY }, true);
+  check(moved.error?.code === 'WINDOW_CHANGED', 'display-image input refuses a window moved after capture');
+  process.stdout.write(`Capture desktop smoke passed: ${checks} checks. All PNGs stayed in RAM.\n`);
+} finally {
+  await client.close().catch(() => {});
+  target.kill(); overlay?.kill();
+}

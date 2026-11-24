@@ -5,6 +5,8 @@ namespace AgyComputerUse;
 
 internal static partial class Program
 {
+    private static bool stdioEvents;
+    internal static void ControlStopped() { if (stdioEvents) Console.WriteLine("{\"event\":\"control_stopped\"}"); }
     internal static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -20,6 +22,7 @@ internal static partial class Program
         if (args.Contains("--pipe-client")) { RunPipeClient(args); return; }
         using var desktop = new DesktopService();
         if (args.Contains("--daemon")) { RunPipe(args, desktop); return; }
+        stdioEvents = true;
         string? line;
         while ((line = Console.ReadLine()) != null)
         {

@@ -92,7 +92,7 @@ internal sealed partial class DesktopService
         if (method == "system")
         {
             var operation = args.Text("operation") ?? "status";
-            if (!new[] { "status", "permissions", "version", "list_displays", "list_apps", "launch", "clipboard_get", "clipboard_set", "clipboard_clear", "clipboard_save", "clipboard_restore", "list_surfaces", "open_surface", "close_surface", "list_notifications", "dismiss_notification", "dismiss_all_notifications", "notification_action", "window_info", "focus_window", "move", "resize", "minimize", "maximize", "restore", "close_window", "close_app", "cursor_config", "cursor_status", "cursor_remove" }.Contains(operation)) throw new DesktopError("INVALID_ARGUMENT", "Unsupported system operation.");
+            if (!new[] { "status", "permissions", "version", "list_displays", "list_apps", "launch", "clipboard_get", "clipboard_set", "clipboard_clear", "clipboard_save", "clipboard_restore", "list_surfaces", "open_surface", "close_surface", "list_notifications", "dismiss_notification", "dismiss_all_notifications", "notification_action", "window_info", "focus_window", "move", "resize", "minimize", "maximize", "restore", "close_window", "close_app", "cursor_config", "cursor_status", "cursor_remove", "control_status", "control_stop", "control_resume" }.Contains(operation)) throw new DesktopError("INVALID_ARGUMENT", "Unsupported system operation.");
             if (new[] { "window_info", "focus_window", "move", "resize", "minimize", "maximize", "restore", "close_window", "close_app", "close_surface" }.Contains(operation)) Require("window_id");
             if (operation == "launch") { Require("app"); _ = args.Text("app", 2048); }
             if (operation == "launch")

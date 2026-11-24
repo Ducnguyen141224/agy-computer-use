@@ -19,7 +19,7 @@ internal static partial class Native
     [DllImport("user32.dll")] internal static extern IntPtr WindowFromPoint(Point point);
     [DllImport("user32.dll", EntryPoint = "SetPhysicalCursorPos", SetLastError = true)] internal static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] internal static extern IntPtr SetProcessDpiAwarenessContext(IntPtr value);
-    [DllImport("user32.dll", SetLastError = true)] internal static extern uint SendInput(uint count, Input[] inputs, int size);
+    [DllImport("user32.dll", EntryPoint = "SendInput", SetLastError = true)] private static extern uint SendInputNative(uint count, Input[] inputs, int size);
     [DllImport("user32.dll")] internal static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll")] internal static extern bool CloseDesktop(IntPtr desktop);
 
@@ -64,8 +64,10 @@ internal static partial class Native
             events.Add(new() { Type = 1, Data = new() { Keyboard = new() { Scan = character, Flags = 0x0004 } } });
             events.Add(new() { Type = 1, Data = new() { Keyboard = new() { Scan = character, Flags = 0x0006 } } });
         }
-        if (events.Count != 0 && SendInput((uint)events.Count, events.ToArray(), Marshal.SizeOf<Input>()) != events.Count)
-            throw new DesktopError("INPUT_UNKNOWN", "Text input may have been partially delivered. Read the field before retrying.");
+        // Small complete down/up chunks leave cancellation checkpoints during long text.
+        foreach (var chunk in events.Chunk(32))
+            if (SendInput((uint)chunk.Length, chunk, Marshal.SizeOf<Input>()) != chunk.Length)
+                throw new DesktopError("INPUT_UNKNOWN", "Text input may have been partially delivered. Read the field before retrying.");
     }
     internal static void PressKey(string key)
     {

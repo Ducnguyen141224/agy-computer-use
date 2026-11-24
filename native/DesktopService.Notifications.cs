@@ -36,7 +36,7 @@ internal sealed partial class DesktopService
             catch (DesktopError error) when (error.Code is "SURFACE_NOT_FOUND" or "SURFACE_NOT_SUPPORTED" or "WINDOW_NOT_FOUND" or "WINDOW_CHANGED") { unavailable = error.Code; }
             catch (ElementNotAvailableException) { unavailable = "SURFACE_CHANGED"; }
             if (timer.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(100);
+            ControlPresentation.Delay(100);
         } while (true);
         return new { verification = "failed", elapsed_ms = timer.ElapsedMilliseconds, state = unavailable == null ? list : null, unavailable, note = "Matching notifications were not observed before timeout. A closed or changing center is not proof of absence." };
     }
@@ -154,7 +154,7 @@ internal sealed partial class DesktopService
         {
             var after = NotificationReader.Read(AutomationElement.FromHandle(entry.Window.Handle));
             if (after.Recognized && after.Complete && !after.Cards.Any(card => RuntimeId(card.Element) == entry.RuntimeId)) return new { delivery = "sent", verification = "passed" };
-            Thread.Sleep(60);
+            ControlPresentation.Delay(60);
         } while (timer.ElapsedMilliseconds < 1500);
         return new { delivery = "sent", verification = "failed", note = "Card disappearance was not verified. Inspect before retrying." };
     }

@@ -104,7 +104,7 @@ internal static partial class Native
         try
         {
             SwitchToThisWindow(window, false);
-            for (var attempt = 0; attempt < 6; attempt++) { if (GetForegroundWindow() == window) return true; Thread.Sleep(25); }
+            for (var attempt = 0; attempt < 6; attempt++) { if (GetForegroundWindow() == window) return true; ControlPresentation.Delay(25); }
         }
         catch (EntryPointNotFoundException) { }
         // Join the foreground input queue only for this explicit focus operation; always detach.
@@ -118,7 +118,7 @@ internal static partial class Native
         {
             BringWindowToTop(window);
             SetForegroundWindow(window);
-            for (var attempt = 0; attempt < 10; attempt++) { if (GetForegroundWindow() == window) return true; Thread.Sleep(30); }
+            for (var attempt = 0; attempt < 10; attempt++) { if (GetForegroundWindow() == window) return true; ControlPresentation.Delay(30); }
             return false;
         }
         finally
@@ -166,7 +166,7 @@ internal static partial class Native
             foreach (var modifier in modifiers) { held.Add(modifier); Send([KeyInput(modifier, false)]); }
             keyDown = true;
             Send([KeyInput(key, false, key is >= 0x21 and <= 0x2E)]);
-            Thread.Sleep(30);
+            ControlPresentation.Delay(30);
         }
         finally
         {
@@ -217,14 +217,14 @@ internal static partial class Native
         RequireReleasedModifiers();
         PositionPointer(x, y);
         CursorOverlay.Pointer(x, y, true);
-        Thread.Sleep(20);
+        ControlPresentation.Delay(20);
         var down = button == "left" ? 2u : button == "right" ? 8u : 0x20u;
         var up = down * 2;
         for (var index = 0; index < count; index++)
         {
-            try { Send([MouseEvent(down)]); Thread.Sleep(35); }
+            try { Send([MouseEvent(down)]); ControlPresentation.Delay(35); }
             finally { SendInput(1, [MouseEvent(up)], Marshal.SizeOf<Input>()); }
-            if (index + 1 < count) Thread.Sleep((int)Math.Clamp(GetDoubleClickTime() / 4, 20, 70));
+            if (index + 1 < count) ControlPresentation.Delay((int)Math.Clamp(GetDoubleClickTime() / 4, 20, 70));
         }
     }
     internal static void WheelAt(int x, int y, int vertical, int horizontal)
@@ -248,13 +248,13 @@ internal static partial class Native
                 var x = from.X + (to.X - from.X) * step / steps;
                 var y = from.Y + (to.Y - from.Y) * step / steps;
                 PositionPointer(x, y);
-                Thread.Sleep(Math.Max(1, durationMs / steps));
+                ControlPresentation.Delay(Math.Max(1, durationMs / steps));
             }
             var dwell = System.Diagnostics.Stopwatch.StartNew();
             while (dwell.ElapsedMilliseconds < dropDelayMs)
             {
                 if (!stillTarget()) throw new DesktopError("FOCUS_CHANGED", "The drag context changed over the destination; the button was released.");
-                Thread.Sleep(20);
+                ControlPresentation.Delay(20);
             }
         }
         finally { SendInput(1, [MouseEvent(4)], Marshal.SizeOf<Input>()); }

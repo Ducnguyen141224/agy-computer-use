@@ -15,11 +15,11 @@ internal sealed partial class DesktopService
         var expanded = false;
         if (candidates.Length == 0 && element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var expand) && ((ExpandCollapsePattern)expand).Current.ExpandCollapseState == ExpandCollapseState.Collapsed)
         {
-            ((ExpandCollapsePattern)expand).Expand(); expanded = true;
+            ControlPresentation.Check(); ((ExpandCollapsePattern)expand).Expand(); expanded = true;
             // Only observations are retried while the provider builds the popup.
             for (var attempt = 0; attempt < 12; attempt++)
             {
-                candidates = Candidates(); if (candidates.Length > 0) break; Thread.Sleep(40);
+                candidates = Candidates(); if (candidates.Length > 0) break; ControlPresentation.Delay(40);
             }
         }
         if (candidates.Length != 1) throw new DesktopError(candidates.Length == 0 ? "OPTION_NOT_FOUND" : "AMBIGUOUS_TARGET", "Selection needs one exact accessible option in this container. Observe the expanded control.", new { matches = candidates.Length, delivery = expanded ? "sent" : "not_sent" });
@@ -27,6 +27,7 @@ internal sealed partial class DesktopService
         Native.RequireInputPrivilege(chosen.Current.ProcessId);
         // Retain the same generation/runtime/ancestry checks used by all ref actions.
         var guarded = Resolve(AddRef(target.Window, chosen));
+        ControlPresentation.Check();
         if (guarded.Element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selection)) ((SelectionItemPattern)selection).Select();
         else if (!guarded.Element.Current.IsOffscreen && guarded.Element.TryGetCurrentPattern(InvokePattern.Pattern, out var invoke)) ((InvokePattern)invoke).Invoke();
         else throw new DesktopError("ACTION_UNSUPPORTED", "The selected option no longer exposes a selection action.");

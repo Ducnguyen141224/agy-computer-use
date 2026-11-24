@@ -123,7 +123,7 @@ internal sealed partial class DesktopService
                 return new { verification = "passed", observed = item, elapsed_ms = timer.ElapsedMilliseconds };
             }
             if (timer.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(30);
+            ControlPresentation.Delay(30);
         } while (true);
         RemoveWatch(token);
         return new { verification = "failed", reason = "No matching subscribed event was received before timeout.", elapsed_ms = timer.ElapsedMilliseconds };

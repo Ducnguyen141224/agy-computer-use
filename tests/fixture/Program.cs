@@ -5,6 +5,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args.Contains("--control-probe")) { ControlProbe.Run(int.Parse(args[^1])); return; }
         if (args.Contains("--notifications")) { NotificationFixture.Run(args[0]); return; }
         if (args.Contains("--drag-source") || args.Contains("--drag-target")) { DragFixture.Run(args[0], args.Contains("--drag-source"), args[^1]); return; }
         if (args.Contains("--launch-metadata")) { LaunchFixture.Run(args[0]); return; }

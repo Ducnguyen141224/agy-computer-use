@@ -34,6 +34,14 @@ agy plugin install .\plugin
 
 Gói có manifest, skill, mcp.json cho Agent Plugins và mcp_config.json tương thích loader native Antigravity. Loader chọn file theo feature flag, không cần thêm server riêng bằng agy mcp add. Gói trỏ tới runtime trong thư mục dự án này; sau khi di chuyển phải build/cài lại. Nếu reinstall báo thư mục đang bị dùng, đóng phiên host đang giữ thư mục rồi cài lại; không ép tắt host đang làm việc.
 
+## Hiệu ứng điều khiển và phím ESC
+
+Từ v0.5.0, plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ có quầng sáng, chuyển động mượt, vòng nhấn chuột. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên khi có. Overlay xuyên click và không lấy focus; viền tự ẩn sau 1,8 giây không còn thao tác, và giữ hiện suốt workflow.
+
+Ấn **ESC** trong khi đang điều khiển để ẩn hiệu ứng và dừng input/workflow, kể cả lúc script đang chạy vòng lặp hoặc native đang chờ/kéo chuột. Plugin nhả phím/nút chuột do nó giữ; thao tác đã gửi trước thời điểm dừng không thể hoàn tác. ESC do chính agent gửi cho ứng dụng không kích hoạt nút dừng. Khi không điều khiển, ESC vẫn hoạt động bình thường trong ứng dụng.
+
+Sau khi dừng, agent phải chờ **yêu cầu mới, rõ ràng của người dùng**, đọc lại UI rồi gọi `desktop_system {"operation":"control_resume"}` trực tiếp. Script/batch không được tự resume. `control_status` đọc trạng thái; `control_stop` yêu cầu dừng bằng tool. Stop latch của MCP giữ qua helper restart; các helper đang sống dùng chung stop event trong RAM của cùng user. Đóng toàn bộ server/helper sẽ mất RAM. Dừng desktop không phải dừng phần sinh văn bản của model trong Antigravity.
+
 ## Các nhóm tool MCP
 
 | Tool | Chức năng |
@@ -118,7 +126,7 @@ Watch window_opened/window_closed/structure_changed/focus_changed dùng UIA. App
 
 `list_surfaces` không có window_id đọc top-level; có window_id đọc thêm menu/sheet/ARIA dialog/alert/tooltip trong cửa sổ. `surface: focused` trả root_ref của focus đã kiểm tra. Drill root_ref; close_surface của sheet nhận window_id và root_ref dưới tên ref, gửi Escape rồi kiểm tra lại. Start/action center/overflow/quick settings mở lại khi đang hiện không toggle đóng.
 
-`cursor_config`, `cursor_status`, `cursor_remove` quản lý overlay trong RAM, mặc định tắt. Agent chọn profile; cursor có enabled/style/accent/fill/rim/size/label/labels/max_words/travel_ms/dwell_ms/ripple/highlight/caret. Size/hotspot dùng pixel hiển thị; dwell_ms là thời gian giữ highlight. Image_path nạp PNG tối đa 2 MiB, 1024×1024; hotspot_x/y nằm trong size. Pointer_image_path/pointer_hotspot_x/y dùng ảnh riêng khi ref là button/link/menuitem. Có thể truyền png_base64/pointer_png_base64 nhỏ ngay trong cursor, không cần file. Travel_min_ms/travel_max_ms chọn thời gian theo khoảng cách; bow/overshoot/tremor/motion_seed tạo chuyển động trình bày xác định theo seed. Pause_ms là khoảng dừng trước ref action; travel tối đa cộng pause không quá 700 ms, và target được kiểm tra lại sau khi chờ. Multi_agent=true yêu cầu agent đã cấu hình trên desktop_act; reset/end hoặc xóa hết profile bỏ yêu cầu. Đổi session ẩn/khôi phục profile riêng. Overlay click-through, không giành focus; caret chỉ vẽ khi Windows cung cấp tọa độ thật.
+`cursor_config`, `cursor_status`, `cursor_remove` quản lý profile con trỏ tùy chỉnh trong RAM; mặc định chưa có profile nên dùng con trỏ tự động khi điều khiển. Agent chọn profile; cursor có enabled/style/accent/fill/rim/size/label/labels/max_words/travel_ms/dwell_ms/ripple/highlight/caret. Size/hotspot dùng pixel hiển thị; dwell_ms là thời gian giữ highlight. Image_path nạp PNG tối đa 2 MiB, 1024×1024; hotspot_x/y nằm trong size. Pointer_image_path/pointer_hotspot_x/y dùng ảnh riêng khi ref là button/link/menuitem. Có thể truyền png_base64/pointer_png_base64 nhỏ ngay trong cursor, không cần file. Travel_min_ms/travel_max_ms chọn thời gian theo khoảng cách; bow/overshoot/tremor/motion_seed tạo chuyển động trình bày xác định theo seed. Pause_ms là khoảng dừng trước ref action; travel tối đa cộng pause không quá 700 ms, và target được kiểm tra lại sau khi chờ. Multi_agent=true yêu cầu agent đã cấu hình trên desktop_act; reset/end hoặc xóa hết profile bỏ yêu cầu. Đổi session ẩn/khôi phục profile riêng. Overlay click-through, không giành focus; caret chỉ vẽ khi Windows cung cấp tọa độ thật.
 
 Drag nhận source ref; drag_point nhận source window_id/capture_id/x/y. Đích là to_ref hoặc to_window_id/to_capture_id/to_x/to_y. Trong cùng ảnh có thể chỉ truyền to_x/to_y. Kiểm tra cả hai endpoint trước input, không tự đưa đích ra trước vì có thể che nguồn. Expect.ref có thể thuộc cửa sổ đích.
 
@@ -181,7 +189,7 @@ Server không ghi ảnh, video, accessibility snapshots, task hồ sơ, trace ha
 
 ## Kiểm tra
 
-`npm run test:regression` chạy nối tiếp 19 suite, gồm workflow trên UI thật, Chrome có giao diện và Edge headless trong profile tạm riêng. Cần hai trình duyệt ở vị trí cài mặc định. Kết quả chỉ in ra terminal; không tạo báo cáo hay media trên đĩa. Các lệnh riêng bên dưới dùng khi chỉ cần kiểm tra nhóm bị ảnh hưởng.
+`npm run test:regression` chạy nối tiếp 20 suite, gồm workflow trên UI thật, Chrome có giao diện và Edge headless trong profile tạm riêng. Cần hai trình duyệt ở vị trí cài mặc định. Kết quả chỉ in ra terminal; không tạo báo cáo hay media trên đĩa. Các lệnh riêng bên dưới dùng khi chỉ cần kiểm tra nhóm bị ảnh hưởng.
 
 ```powershell
 npm run build
@@ -195,6 +203,7 @@ npm run test:capture
 npm run test:drag
 npm run test:launch
 npm run test:presentation
+npm run test:control
 npm run test:lifecycle
 npm run test:workflow
 npm run test:shell-notifications

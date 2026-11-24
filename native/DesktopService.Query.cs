@@ -27,7 +27,7 @@ internal sealed partial class DesktopService
         }
         if (operation == "surface_wait") return WaitSurface(args);
         if (operation == "text_wait") return WaitText(args);
-        if (operation == "time_wait") { var clock = Stopwatch.StartNew(); Thread.Sleep(args.Number("timeout_ms", 1000, 0, 10000)); return new { verification = "passed", elapsed_ms = clock.ElapsedMilliseconds }; }
+        if (operation == "time_wait") { var clock = Stopwatch.StartNew(); ControlPresentation.Delay(args.Number("timeout_ms", 1000, 0, 10000)); return new { verification = "passed", elapsed_ms = clock.ElapsedMilliseconds }; }
         if (operation == "notification_wait") return WaitNotification(args);
         if (operation == "watch") return CreateWatch(args);
         if (operation == "wait_event") return WaitEvent(args);
@@ -48,7 +48,7 @@ internal sealed partial class DesktopService
             value = ReadProperty(reference, property, args.Text("action"));
             matches = Matches(value, args);
             if (operation == "get" || matches || timer.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(60);
+            ControlPresentation.Delay(60);
         } while (true);
         var text = value as string;
         return new { property, value = text == null ? value : Trim(text, limit), complete = text == null || text.Length <= limit, matches = operation == "get" ? (bool?)null : matches, verification = operation == "get" ? null : matches ? "passed" : "failed", elapsed_ms = timer.ElapsedMilliseconds };
@@ -174,7 +174,7 @@ internal sealed partial class DesktopService
             var count = result.GetProperty("total").GetInt32();
             if ((count > 0) == present) return new { verification = "passed", windows = result.GetProperty("windows"), elapsed_ms = timer.ElapsedMilliseconds };
             if (timer.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(80);
+            ControlPresentation.Delay(80);
         } while (true);
         return new { verification = "failed", windows = result.GetProperty("windows"), elapsed_ms = timer.ElapsedMilliseconds, reason = "Window condition was not observed before timeout." };
     }
@@ -192,7 +192,7 @@ internal sealed partial class DesktopService
             matches = surfaces.GetProperty("surfaces").EnumerateArray().Where(item => (item.GetProperty("kind").GetString() == kind || item.TryGetProperty("surface", out var subtype) && subtype.GetString() == kind) && (owner == null || item.GetProperty("window").GetProperty("pid").GetInt32() == owner.Pid)).Select(item => item.Clone()).ToArray();
             if ((matches.Length > 0) == present && (present || surfaces.GetProperty("complete").GetBoolean())) return new { verification = "passed", surfaces = matches, elapsed_ms = timer.ElapsedMilliseconds };
             if (timer.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(60);
+            ControlPresentation.Delay(60);
         } while (true);
         return new { verification = "failed", surfaces = matches, elapsed_ms = timer.ElapsedMilliseconds, reason = "Surface condition was not observed before timeout." };
     }
@@ -206,6 +206,7 @@ internal sealed partial class DesktopService
             var method = command.Text("method");
             if (method is not ("windows" or "observe" or "find" or "act" or "query" or "system" or "capture")) throw new DesktopError("INVALID_ARGUMENT", "This method cannot be batched.");
             ValidateCommand(method, command.GetProperty("params"));
+            if (method == "system" && command.GetProperty("params").Text("operation") == "control_resume") throw new DesktopError("INVALID_ARGUMENT", "Resume must be a direct user-requested operation, never a batch step.");
         }
         if (commands.EnumerateArray().Count(command => command.Text("method") == "capture") > 4) throw new DesktopError("INVALID_ARGUMENT", "A batch can contain at most four captures.");
         var stop = args.Flag("stop_on_error", true);

@@ -26,7 +26,7 @@ internal sealed partial class DesktopService
             var matched = requested.HasValue ? complete && actual == requested.Value : present ? actual > 0 : complete && actual == 0;
             if (matched) return new { verification = "passed", count = actual, complete, items = found.GetProperty("items"), elapsed_ms = clock.ElapsedMilliseconds };
             if (clock.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(60);
+            ControlPresentation.Delay(60);
         } while (true);
         return new { verification = "failed", count = found.GetProperty("items").GetArrayLength(), complete = found.GetProperty("complete"), items = found.GetProperty("items"), elapsed_ms = clock.ElapsedMilliseconds, reason = "Text condition was not proved within the bounded UIA scope. Partial reads cannot prove absence or an exact count." };
     }

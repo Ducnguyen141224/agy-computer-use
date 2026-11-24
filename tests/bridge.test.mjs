@@ -6,6 +6,22 @@ import { NativeBridge } from '../src/native-bridge.mjs';
 const helper = fileURLToPath(new URL('./helper-fixture.mjs', import.meta.url));
 const makeBridge = () => new NativeBridge({ command: process.execPath, args: [helper], timeoutMs: 500 });
 
+test('Escape event stops delivery, rejects queued input across helper restart, and needs explicit resume', async () => {
+  const bridge = makeBridge();
+  try {
+    let stopped = false; bridge.once('controlStop', () => { stopped = true; });
+    const stopping = bridge.request('escape', {});
+    const queued = bridge.request('act', { action: 'click', ref: '@old' });
+    await assert.rejects(stopping, { code: 'USER_STOPPED' });
+    await assert.rejects(queued, error => error.code === 'USER_STOPPED' && error.details.delivery === 'not_sent');
+    assert.equal(stopped, true);
+    assert.equal((await bridge.request('system', { operation: 'control_status' })).data.paused, true);
+    await assert.rejects(bridge.request('lease', { operation: 'begin' }), { code: 'USER_STOPPED' });
+    await bridge.request('system', { operation: 'control_resume' });
+    assert.equal((await bridge.request('act', {})).ok, true);
+  } finally { bridge.close(); }
+});
+
 test('serializes concurrent requests so desktop observations and actions do not interleave', async () => {
   const bridge = makeBridge();
   try {

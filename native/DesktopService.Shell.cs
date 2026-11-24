@@ -184,7 +184,7 @@ internal sealed partial class DesktopService
             Native.RequireInputPrivilege((int)taskbarPid);
             if (Native.ActivateStartMenu())
             {
-                Thread.Sleep(180);
+                ControlPresentation.Delay(180);
                 return new { delivery = "sent", verification = "not_requested", requested_surface = surface, mechanism = "DEF_WINDOW_PROC_SC_TASKLIST", surfaces = ListSurfaces(JsonSerializer.SerializeToElement(new { })) };
             }
             var root = AutomationElement.FromHandle(taskbar);
@@ -201,7 +201,7 @@ internal sealed partial class DesktopService
                 }
             }
             else Native.KeyChord("Win");
-            Thread.Sleep(180);
+            ControlPresentation.Delay(180);
             return new { delivery = "sent", verification = "not_requested", requested_surface = surface, surfaces = ListSurfaces(JsonSerializer.SerializeToElement(new { })) };
         }
         if (surface == "taskbar")
@@ -210,7 +210,7 @@ internal sealed partial class DesktopService
             if (taskbar == IntPtr.Zero) throw new DesktopError("SURFACE_NOT_FOUND", "Taskbar window was not found.");
             Native.KeyChord("Win+T");
             var entry = RegisterWindow(taskbar);
-            for (var attempt = 0; attempt < 15 && !IsActiveSurface(entry); attempt++) Thread.Sleep(20);
+            for (var attempt = 0; attempt < 15 && !IsActiveSurface(entry); attempt++) ControlPresentation.Delay(20);
             if (!IsActiveSurface(entry) && !Native.ActivateWindow(taskbar)) throw new DesktopError("FOCUS_DENIED", "Taskbar did not receive focus.");
             return new { delivery = "sent", window = WindowInfo(entry) };
         }
@@ -238,7 +238,7 @@ internal sealed partial class DesktopService
             _ => throw new DesktopError("INVALID_ARGUMENT", "Unknown system surface.")
             });
         }
-        Thread.Sleep(180);
+        ControlPresentation.Delay(180);
         var foreground = Native.GetForegroundWindow();
         var selectedWindow = foreground == IntPtr.Zero ? null : RegisterWindow(foreground);
         return new { delivery = "sent", verification = "not_requested", requested_surface = surface, foreground = selectedWindow == null ? null : WindowInfo(selectedWindow), surfaces = ListSurfaces(JsonSerializer.SerializeToElement(new { })) };

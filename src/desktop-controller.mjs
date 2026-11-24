@@ -3,11 +3,11 @@ import { guides } from './guides.mjs';
 import { TaskContext } from './task-context.mjs';
 import { WorkflowRuntime } from './workflow-runtime.mjs';
 
-const readOperations = new Set(['status','permissions','version','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status']);
-const mutates = (method, args) => method === 'act' || method === 'batch' || method === 'system' && !readOperations.has(args.operation);
+const readOperations = new Set(['status','permissions','version','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status','control_status','control_stop','control_resume']);
+const mutates = (method, args) => args.open === true || method === 'act' || method === 'batch' || method === 'system' && !readOperations.has(args.operation);
 const failure = (code, message, details) => ({ ok: false, error: { code, message, details } });
 export class DesktopController {
-  constructor(bridge) { this.bridge = bridge; this.tail = Promise.resolve(); this.session = 'default'; this.contexts = new Map([['default', new TaskContext()]]); this.runtimes = new Map(); this.generation = 0; this.closed = false; }
+  constructor(bridge) { this.bridge = bridge; this.tail = Promise.resolve(); this.session = 'default'; this.contexts = new Map([['default', new TaskContext()]]); this.runtimes = new Map(); this.generation = 0; this.closed = false; this.stopRun = null; bridge.on?.('controlStop', () => { this.stopRun?.(); for (const runtime of this.runtimes.values()) runtime.close(); this.runtimes.clear(); this.context.invalidate(); }); }
   get context() { if (!this.contexts.has(this.session)) this.contexts.set(this.session, new TaskContext()); return this.contexts.get(this.session); }
   request(name, args, { signal } = {}) {
     const work = this.tail.then(async () => {
@@ -61,6 +61,7 @@ export class DesktopController {
     if (!runtime || runtime.closed) { runtime = new WorkflowRuntime(); this.runtimes.set(this.session, runtime); }
     const started = Date.now(); const controller = new AbortController();
     const abort = () => controller.abort(); signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+    this.stopRun = abort;
     let latch = null, steps = 0, characters = 0, mutationSent = false, lease = null, leaseGeneration = this.bridge.generation;
     const emitted = [], artifacts = [];
     const dispatch = async (method, encoded) => {
@@ -75,6 +76,7 @@ export class DesktopController {
         }
         if (!['windows','observe','find','act','query','system','capture'].includes(method)) throw new Error('This API is unavailable in workflows.');
         const tool = tools.find(item => item.name === `desktop_${method}`); validateCall(tool, parameters);
+        if (method === 'system' && parameters.operation === 'control_resume') throw new Error('Resume is forbidden inside workflows. It requires a direct user-requested desktop_system call.');
         if (++steps > (args.max_steps ?? 20)) throw Object.assign(new Error('Workflow desktop step budget exceeded.'), { code: 'STEP_LIMIT' });
         if (method === 'capture' || method === 'system' && parameters.operation === 'clipboard_get' && (parameters.image || ['auto','image'].includes(parameters.format))) { if (artifacts.length >= 2) throw new Error('Workflow image budget exceeded.'); }
         if (mutates(method, parameters) && this.context.uncertainty) throw Object.assign(new Error('An earlier action has unresolved delivery. Read the UI and reconcile task context before new input.'), { code: 'RECONCILIATION_REQUIRED' });
@@ -97,6 +99,7 @@ export class DesktopController {
       const locked = await this.#native('lease', { operation: 'begin' }, controller.signal); if (!locked.ok) return locked;
       lease = locked.data.token; leaseGeneration = this.bridge.generation;
       result = await runtime.run(args.code, { timeout_ms: args.timeout_ms ?? 12000, dispatch, signal: controller.signal });
+      if (this.bridge.userStopped) latch = { code: 'USER_STOPPED', message: 'Escape stopped the workflow. Resume only after a new explicit user instruction.' };
       if (!result.ok || latch) {
         controller.abort(); runtime.close(); this.runtimes.delete(this.session);
         if (mutationSent && !this.context.uncertainty) this.context.uncertain('run', {}, latch?.code ?? result.error?.code ?? 'SCRIPT_ERROR');
@@ -104,6 +107,7 @@ export class DesktopController {
       }
       output = { ok: true, data: { execution_status: 'completed', result: result.value, emitted, artifacts, steps, elapsed_ms: Date.now() - started, metrics: { native_response_characters: characters, output_policy: 'selected return/emits only; image bytes excluded', token_usage: null }, state_preserved: true, note: 'Completed execution is not proof of task completion. Read explicit postconditions.', replayed_actions: 0 } }; return output;
     } finally {
+      this.stopRun = null;
       signal?.removeEventListener('abort', abort);
       if (lease && this.bridge.child && this.bridge.generation === leaseGeneration) {
         let released = false;
@@ -111,7 +115,7 @@ export class DesktopController {
         if (!released) {
           this.bridge.invalidate(); runtime.close(); this.runtimes.delete(this.session); this.context.invalidate();
           if (mutationSent && !this.context.uncertainty) this.context.uncertain('run', {}, 'LEASE_RELEASE_UNKNOWN');
-          if (output) Object.assign(output.data, { execution_status: 'failed', verification: 'failed', error: { code: 'LEASE_RELEASE_UNKNOWN', message: 'Native workflow lease cleanup was not confirmed. Helper/runtime were discarded; inspect UI before continuing.' }, state_preserved: false, runtime_reset: true, recovery: this.context.command({ operation: 'read' }, this.session) });
+          if (output) Object.assign(output.data, { execution_status: 'failed', verification: 'failed', error: this.bridge.userStopped || output.data.error?.code === 'USER_STOPPED' ? { code: 'USER_STOPPED', message: 'Escape stopped control; helper/runtime were discarded. Inspect the UI before resuming.' } : { code: 'LEASE_RELEASE_UNKNOWN', message: 'Native workflow lease cleanup was not confirmed. Helper/runtime were discarded; inspect UI before continuing.' }, state_preserved: false, runtime_reset: true, recovery: this.context.command({ operation: 'read' }, this.session) });
         }
       }
     }

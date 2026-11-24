@@ -8,7 +8,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const node = (label, script, ...args) => ({ label, command: process.execPath, args: [script, ...args] });
 const suites = [
   { label: 'unit and transport', command: process.execPath, args: ['--test', ...readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.mjs')).map(name => join('tests', name))] },
-  ...['desktop', 'advanced', 'provider', 'capture', 'drag', 'launch', 'presentation', 'lifecycle', 'workflow', 'shell', 'cli'].map(name => node(name, `scripts/${name}-smoke.mjs`)),
+  ...['desktop', 'advanced', 'provider', 'capture', 'drag', 'launch', 'presentation', 'control', 'lifecycle', 'workflow', 'shell', 'cli'].map(name => node(name, `scripts/${name}-smoke.mjs`)),
   { label: 'C ABI', command: 'dotnet', args: ['run', '--project', 'tests/ffi/FfiSmoke.csproj', '-c', 'Release', '--', '.'] },
   { label: 'notification parser', command: 'dotnet', args: ['run', '--project', 'tests/notifications/NotificationSmoke.csproj', '-c', 'Release', '--', '.'] },
   { label: 'real shell notifications', command: 'dotnet', args: ['run', '--project', 'tests/notifications/NotificationSmoke.csproj', '-c', 'Release', '--', '.', '--shell'] },
@@ -18,7 +18,10 @@ const suites = [
   node('installed plugin', 'scripts/plugin-smoke.mjs', join(homedir(), '.gemini', 'config', 'plugins', 'agy-computer-use'))
 ];
 let passed = 0;
-for (const suite of suites) {
+const from = process.argv.indexOf('--from');
+const first = from < 0 ? 0 : suites.findIndex(suite => suite.label === process.argv[from + 1]);
+if (first < 0) throw new Error('Unknown regression suite after --from.');
+for (const suite of suites.slice(first)) {
   process.stdout.write(`RUN ${suite.label}\n`);
   const result = await new Promise(resolve => {
     const child = spawn(suite.command, suite.args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -33,4 +36,4 @@ for (const suite of suites) {
   process.stdout.write(`PASS ${suite.label}: ${lines.at(-1) ?? 'completed with exit code 0'}\n`);
   passed++;
 }
-process.stdout.write(`All ${passed} regression suites passed. Results and media were kept in RAM; no test report was written.\n`);
+process.stdout.write(`All ${passed} ${first ? 'remaining' : 'regression'} suites passed. Results and media were kept in RAM; no test report was written.\n`);

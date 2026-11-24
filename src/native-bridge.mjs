@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
 
 const executable = fileURLToPath(new URL('../native/bin/Release/net10.0-windows/AgyComputerUse.exe', import.meta.url));
 
@@ -12,8 +13,9 @@ export class BridgeError extends Error {
 }
 
 /** One helper, one request at a time. No desktop data or stderr is written to disk. */
-export class NativeBridge {
+export class NativeBridge extends EventEmitter {
   constructor({ command = executable, args = [], timeoutMs = 12000 } = {}) {
+    super();
     this.command = command;
     this.args = args;
     this.timeoutMs = timeoutMs;
@@ -23,13 +25,20 @@ export class NativeBridge {
     this.pending = null;
     this.closed = false;
     this.generation = 0;
+    this.userStopped = false;
   }
 
   request(method, params, { signal } = {}) {
     const operation = this.tail.then(() => {
       if (signal?.aborted) throw new BridgeError('CANCELLED', 'Request cancelled before execution.', { delivery: 'not_sent' });
       if (this.closed) throw new BridgeError('CLOSED', 'Desktop server is closed.');
-      return this.#send(method, params, signal);
+      const readonly = method === 'system' && ['status','permissions','version','control_status','control_stop','control_resume','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status'].includes(params.operation);
+      if (this.userStopped && (params.open === true || ['act','batch'].includes(method) || method === 'system' && !readonly || method === 'lease' && params.operation === 'begin')) throw new BridgeError('USER_STOPPED', 'Escape stopped control. Resume only after a new explicit user instruction.', { delivery: 'not_sent' });
+      return this.#send(method, params, signal).then(reply => {
+        if (method === 'system' && params.operation === 'control_resume' && reply.ok) this.userStopped = false;
+        if (method === 'system' && ['status','permissions','version','control_status'].includes(params.operation) && reply.ok && this.userStopped) { if (reply.data.control) reply.data.control.paused = true; else reply.data.paused = true; }
+        return reply;
+      });
     });
     this.tail = operation.catch(() => {});
     return operation;
@@ -55,9 +64,16 @@ export class NativeBridge {
         if (!line) continue;
         try {
           const reply = JSON.parse(line);
+          if (reply.event === 'control_stopped' && reply.id === undefined) {
+            this.userStopped = true;
+            this.#reset(new BridgeError('USER_STOPPED', 'Escape stopped control. Inspect the UI; no action was replayed.', { delivery: 'unknown' }));
+            this.emit('controlStop');
+            return;
+          }
           if (!this.pending || reply.id !== this.pending.id) throw new Error('Unexpected helper response.');
           const pending = this.pending;
           this.pending = null;
+          if (reply.error?.code === 'USER_STOPPED') this.userStopped = true;
           pending.cleanup();
           pending.resolve(reply);
         } catch {

@@ -50,6 +50,9 @@ internal static class CursorOverlay
     }
     private static OverlayForm? form;
     private static volatile bool enabled;
+    private static bool suspended;
+    internal static bool HasEnabledProfile => enabled;
+    internal static void Suspend(bool value) { suspended = value; if (form != null) { if (value) form.Hide(); else if (enabled) form.Show(); } }
     private static string active = "default";
     internal static IntPtr WindowHandle;
     internal static object RenderState() => !enabled ? new { rendered = false, caret = (object?)null } : StaDispatcher.Run<object>(() => new { rendered = form?.Visible == true && WindowHandle != IntPtr.Zero, caret = form?.Markers.TryGetValue(active, out var marker) == true && marker.Caret is Rectangle r ? (object)new { x = r.X, y = r.Y, width = r.Width, height = r.Height } : null });
@@ -61,17 +64,19 @@ internal static class CursorOverlay
         if (!enabled) { form?.Close(); form = null; WindowHandle = IntPtr.Zero; return true; }
         form ??= new OverlayForm();
         form.UpdateProfiles(profiles);
-        if (!form.Visible) form.Show();
+        if (!form.Visible && !suspended) form.Show();
         WindowHandle = form.Handle;
         return true;
     });
     internal static void Pointer(int x, int y, bool pulse = false)
     {
+        ControlPresentation.Pointer(x, y, pulse);
         if (!enabled) return;
         StaDispatcher.Run(() => { if (form?.Markers.TryGetValue(active, out var marker) == true && marker.Config.Enabled) { var now = Environment.TickCount64; marker.Move(new(x, y), now); if (pulse) marker.Pulse = now; form.Invalidate(); } return true; });
     }
     internal static void Highlight(System.Windows.Rect rect, bool caret, bool pulse, bool pressable = false)
     {
+        if (!rect.IsEmpty && rect.Width > 0 && rect.Height > 0) ControlPresentation.Pointer((int)(rect.X + rect.Width / 2), (int)(rect.Y + rect.Height / 2), pulse);
         if (!enabled || rect.IsEmpty || rect.Width <= 0 || rect.Height <= 0) return;
         StaDispatcher.Run(() =>
         {
@@ -92,7 +97,7 @@ internal static class CursorOverlay
     {
         if (!enabled) return;
         var pause = StaDispatcher.Run(() => form?.Markers.TryGetValue(active, out var marker) == true && marker.Config.Enabled && marker.Config.PauseMs > 0 ? Math.Max(0, marker.Duration - (int)(Environment.TickCount64 - marker.Moved)) + marker.Config.PauseMs : 0);
-        if (pause > 0) Thread.Sleep(pause);
+        if (pause > 0) ControlPresentation.Delay(pause);
     }
     internal static void Caret(System.Windows.Rect? rect)
     {

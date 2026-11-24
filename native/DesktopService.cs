@@ -33,6 +33,7 @@ internal sealed partial class DesktopService : IDisposable
         ValidateCommand(method, args);
         var metadata = method == "system" && args.Text("operation") is "status" or "permissions" or "version";
         if (!metadata) EnsureDesktop();
+        using var activity = IsControlMutation(method, args) ? ControlPresentation.Begin() : null;
         return method switch
         {
             "windows" => ListWindows(args),
@@ -47,7 +48,8 @@ internal sealed partial class DesktopService : IDisposable
             _ => throw new DesktopError("INVALID_ARGUMENT", "Unknown desktop operation.")
         };
     }
-    public void Dispose() { ReleaseWorkflowLease(); CursorOverlay.Close(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
+    private static bool IsControlMutation(string method, JsonElement args) => args.Flag("open") || method is "act" or "batch" || method == "system" && args.Text("operation") is not ("status" or "permissions" or "version" or "list_apps" or "list_displays" or "window_info" or "clipboard_get" or "list_surfaces" or "list_notifications" or "cursor_status" or "cursor_config" or "cursor_remove" or "control_status" or "control_resume" or "control_stop");
+    public void Dispose() { ReleaseWorkflowLease(); ControlPresentation.Close(); CursorOverlay.Close(); Native.ReleaseOwnedInput(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
 
     private static void EnsureDesktop()
     {
@@ -64,7 +66,7 @@ internal sealed partial class DesktopService : IDisposable
         {
             try
             {
-                if (handle == CursorOverlay.WindowHandle || !Native.IsWindowVisible(handle) || Native.IsCloaked(handle)) return true;
+                if (handle == CursorOverlay.WindowHandle || handle == ControlPresentation.WindowHandle || !Native.IsWindowVisible(handle) || Native.IsCloaked(handle)) return true;
                 var titleBuffer = new StringBuilder(1024);
                 Native.GetWindowText(handle, titleBuffer, titleBuffer.Capacity);
                 var title = titleBuffer.ToString();
@@ -309,6 +311,7 @@ internal sealed partial class DesktopService : IDisposable
             _ = Resolve(target.Ref); // Presentation delays cannot waive the normal identity guard.
         }
         var delivery = "sent";
+        ControlPresentation.Check();
         switch (action)
         {
             case "focus_window":
@@ -349,9 +352,9 @@ internal sealed partial class DesktopService : IDisposable
                     {
                         var previous = toggle.Current.ToggleState;
                         if (!seen.Add(previous)) break;
-                        toggle.Toggle();
+                        ControlPresentation.Check(); toggle.Toggle();
                         var transition = Stopwatch.StartNew();
-                        while (toggle.Current.ToggleState == previous && transition.ElapsedMilliseconds < 500) Thread.Sleep(30);
+                        while (toggle.Current.ToggleState == previous && transition.ElapsedMilliseconds < 500) ControlPresentation.Delay(30);
                         if (toggle.Current.ToggleState == previous) break;
                     }
                     if (toggle.Current.ToggleState != desired) throw new DesktopError("STATE_UNVERIFIED", "Toggle was sent but the requested state was not reached. Observe before another action.", new { delivery = "sent", retry = "observe_first" });
@@ -376,7 +379,7 @@ internal sealed partial class DesktopService : IDisposable
                 for (var unit = 0; unit < args.Number("steps", 1, 1, 30); unit++)
                 {
                     _ = Resolve(target!.Ref);
-                    scrolling.Scroll(direction == "right" ? increment : direction == "left" ? decrement : ScrollAmount.NoAmount, direction == "down" ? increment : direction == "up" ? decrement : ScrollAmount.NoAmount);
+                    ControlPresentation.Check(); scrolling.Scroll(direction == "right" ? increment : direction == "left" ? decrement : ScrollAmount.NoAmount, direction == "down" ? increment : direction == "up" ? decrement : ScrollAmount.NoAmount);
                 }
                 break;
             case "focus":
@@ -395,7 +398,7 @@ internal sealed partial class DesktopService : IDisposable
                     {
                         EnsureForeground(window);
                         if (AutomationElement.FocusedElement is not AutomationElement typingFocus || RuntimeId(typingFocus) != target!.RuntimeId) throw new DesktopError("FOCUS_CHANGED", "Typing was interrupted after partial delivery because focus changed. Inspect text before continuing.", new { delivery = "unknown" });
-                        Native.TypeText(rune.ToString()); Thread.Sleep(interval);
+                        Native.TypeText(rune.ToString()); ControlPresentation.Delay(interval);
                     }
                 }
                 else if (action == "type_text") Native.TypeText(text!); else Native.KeyChord(key!, args.Flag("force"));
@@ -422,7 +425,7 @@ internal sealed partial class DesktopService : IDisposable
             actual = ReadExpectation(expectation, target, window);
             if (Equals(actual, expectation.Expected)) return new { delivery, verification = "passed", property = expectation.Property, actual = ShortActual(actual), window_id = window.Id };
             if (timer.ElapsedMilliseconds >= timeout) break;
-            Thread.Sleep(70);
+            ControlPresentation.Delay(70);
         } while (true);
         return new { delivery, verification = "failed", property = expectation.Property, actual = ShortActual(actual), reason = "Postcondition was not observed before timeout. Do not repeat input without reading current state.", retry = "observe_first", window_id = window.Id };
     }

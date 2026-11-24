@@ -1,6 +1,6 @@
 {
   "name": "agy-computer-use",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -26,6 +26,7 @@
     "test:capture": "node scripts/capture-smoke.mjs",
     "test:drag": "node scripts/drag-smoke.mjs",
     "test:presentation": "node scripts/presentation-smoke.mjs",
+    "test:control": "node scripts/control-smoke.mjs",
     "test:lifecycle": "node scripts/lifecycle-smoke.mjs",
     "test:cdp": "dotnet run --project tests/cdp/CdpSmoke.csproj -c Release --",
     "test:launch": "node scripts/launch-smoke.mjs",

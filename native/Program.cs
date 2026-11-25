@@ -18,6 +18,7 @@ internal static partial class Program
     {
         Console.InputEncoding = System.Text.Encoding.UTF8;
         Console.OutputEncoding = new System.Text.UTF8Encoding(false);
+        if (args.Contains("--control-paused")) ControlPresentation.PreserveStop();
         Native.SetProcessDpiAwarenessContext(new IntPtr(-4));
         if (args.Contains("--pipe-client")) { RunPipeClient(args); return; }
         using var desktop = new DesktopService();
@@ -59,7 +60,7 @@ internal static partial class Program
             }
             return JsonSerializer.Serialize(reply, Json);
     }
-    internal static bool Mutating(string? method) => method is "act" or "system" or "batch";
+    internal static bool Mutating(string? method) => method is "act" or "system" or "batch" or "read";
 }
 
 internal sealed class DesktopError(string code, string message, object? details = null) : Exception(message)

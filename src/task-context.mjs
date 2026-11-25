@@ -9,6 +9,7 @@ export class TaskContext {
       this.window_id = data.window_id; this.observation = { snapshot: data.snapshot, complete: data.complete, scope: args.root_ref ?? 'window' }; this.readRevision = this.revision; this.needs_observation = false;
     }
     if (method === 'query' && (['get', 'is', 'focused'].includes(args.operation) || data.verification === 'passed')) this.readRevision = this.revision;
+    if (method === 'read' && data.source === 'uia_text') this.readRevision = this.revision;
     if (data.verification === 'passed') {
       this.verified.push({ source: method, operation: args.action ?? args.operation, ref: args.ref, property: args.expect?.property ?? args.property, revision: this.revision });
       this.verified = this.verified.slice(-6);

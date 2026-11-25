@@ -8,7 +8,7 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const node = (label, script, ...args) => ({ label, command: process.execPath, args: [script, ...args] });
 const suites = [
   { label: 'unit and transport', command: process.execPath, args: ['--test', ...readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.mjs')).map(name => join('tests', name))] },
-  ...['desktop', 'advanced', 'provider', 'capture', 'drag', 'launch', 'presentation', 'control', 'lifecycle', 'workflow', 'shell', 'cli'].map(name => node(name, `scripts/${name}-smoke.mjs`)),
+  ...['desktop', 'advanced', 'provider', 'capture', 'drag', 'launch', 'presentation', 'control', 'reading', 'lifecycle', 'workflow', 'shell', 'cli'].map(name => node(name, `scripts/${name}-smoke.mjs`)),
   { label: 'C ABI', command: 'dotnet', args: ['run', '--project', 'tests/ffi/FfiSmoke.csproj', '-c', 'Release', '--', '.'] },
   { label: 'notification parser', command: 'dotnet', args: ['run', '--project', 'tests/notifications/NotificationSmoke.csproj', '-c', 'Release', '--', '.'] },
   { label: 'real shell notifications', command: 'dotnet', args: ['run', '--project', 'tests/notifications/NotificationSmoke.csproj', '-c', 'Release', '--', '.', '--shell'] },

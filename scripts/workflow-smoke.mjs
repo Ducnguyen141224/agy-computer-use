@@ -1,3 +1,4 @@
+import { desktopTestEnv } from '../tests/mcp-env.mjs';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,7 @@ execFileSync('dotnet', ['build', 'tests/fixture/DesktopFixture.csproj', '-c', 'R
 const title = `AGY workflow ${randomUUID()}`;
 const fixture = spawn(fileURLToPath(new URL('../tests/fixture/bin/Release/net10.0-windows/DesktopFixture.exe', import.meta.url)), [title], { stdio: 'ignore' });
 const client = new Client({ name: 'workflow-smoke', version: '0.4.0' });
-const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+const transport = new StdioClientTransport({ env: desktopTestEnv(), command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
 let checks = 0, baselineBytes = 0, baselineRequestBytes = 0, baselineCalls = 0;
 const check = (value, message) => { assert.ok(value, message); checks++; process.stdout.write(`PASS ${message}\n`); };
 try {
@@ -25,7 +26,7 @@ try {
   const fingerprint = async () => createHash('sha256').update(JSON.stringify((await client.listTools()).tools)).digest('hex');
   const catalog = await fingerprint();
   const resources = await client.listResources();
-  check(resources.resources.length === 10 && (await client.readResource({ uri: 'agy://guides/runtime' })).contents[0].text.includes('QuickJS'), 'MCP resources disclose a single requested guide without loading every guide into the prompt');
+  check(resources.resources.length === 11 && (await client.readResource({ uri: 'agy://guides/runtime' })).contents[0].text.includes('QuickJS'), 'MCP resources disclose a single requested guide without loading every guide into the prompt');
   const window_id = (await call('desktop_query', { operation: 'window_wait', query: title, timeout_ms: 5000 })).windows.find(item => item.pid === fixture.pid).id;
   await call('desktop_help', { topic: 'runtime' });
   await call('desktop_context', { operation: 'update', goal: 'Save a disposable fixture message', constraints: ['Operate only the nonce-named fixture', 'Keep all state in RAM'], next_step: 'Find Message and Save, verify the resulting Status' });
@@ -77,7 +78,7 @@ try {
   check((await call('desktop_query', { operation: 'get', ref: message, property: 'value' })).value === 'Lease released', 'native input lease is released after runtime interruption');
   await call('desktop_session', { operation: 'end', session_id: newSession.session_id });
   const competitor = new Client({ name: 'competing-helper-smoke', version: '0.4.0' });
-  const secondTransport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+  const secondTransport = new StdioClientTransport({ env: desktopTestEnv(), command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
   try {
     await competitor.connect(secondTransport);
     const competingCall = async (name, args) => { const reply = await competitor.callTool({ name, arguments: args }); return { error: reply.isError, data: JSON.parse(reply.content[0].text) }; };

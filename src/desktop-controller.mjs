@@ -3,8 +3,8 @@ import { guides } from './guides.mjs';
 import { TaskContext } from './task-context.mjs';
 import { WorkflowRuntime } from './workflow-runtime.mjs';
 
-const readOperations = new Set(['status','permissions','version','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status','control_status','control_stop','control_resume']);
-const mutates = (method, args) => args.open === true || method === 'act' || method === 'batch' || method === 'system' && !readOperations.has(args.operation);
+const readOperations = new Set(['status','permissions','version','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status','control_status','control_stop','control_resume','control_start','control_end']);
+const mutates = (method, args) => args.open === true || method === 'act' || method === 'batch' || method === 'read' && args.operation === 'collect' || method === 'system' && !readOperations.has(args.operation);
 const failure = (code, message, details) => ({ ok: false, error: { code, message, details } });
 export class DesktopController {
   constructor(bridge) { this.bridge = bridge; this.tail = Promise.resolve(); this.session = 'default'; this.contexts = new Map([['default', new TaskContext()]]); this.runtimes = new Map(); this.generation = 0; this.closed = false; this.stopRun = null; bridge.on?.('controlStop', () => { this.stopRun?.(); for (const runtime of this.runtimes.values()) runtime.close(); this.runtimes.clear(); this.context.invalidate(); }); }
@@ -17,6 +17,11 @@ export class DesktopController {
         validateCall(tool, args);
         if (name === 'desktop_help') return { ok: true, data: { topic: args.topic, instructions: guides[args.topic] } };
         if (name === 'desktop_context') return { ok: true, data: this.context.command(args, this.session) };
+        if ((['desktop_windows','desktop_observe','desktop_find','desktop_capture','desktop_query','desktop_read','desktop_run','desktop_act','desktop_batch'].includes(name) || name === 'desktop_system' && mutates('system', args)) && !this.bridge.userStopped) {
+          const scope = await this.#native('system', { operation: 'control_start' }, signal);
+          const recoveryRead = ['desktop_windows','desktop_observe','desktop_find','desktop_capture','desktop_query'].includes(name) || name === 'desktop_read' && args.operation === 'snapshot';
+          if (!scope.ok && !(scope.error?.code === 'USER_STOPPED' && recoveryRead)) return scope;
+        }
         if (name === 'desktop_run') return await this.#run(args, signal);
         const method = name.slice(8);
         const native = method === 'batch' ? { ...args, commands: args.commands.map(item => ({ method: item.tool.slice(8), params: item.arguments })) } : args;
@@ -74,9 +79,9 @@ export class DesktopController {
           const text = JSON.stringify(parameters.value); if (text === undefined || text.length > 4000 || emitted.length >= 8) throw new Error('Emit budget exceeded.');
           emitted.push(parameters.value); return { ok: true, data: { emitted: emitted.length } };
         }
-        if (!['windows','observe','find','act','query','system','capture'].includes(method)) throw new Error('This API is unavailable in workflows.');
+        if (!['windows','observe','find','act','query','system','capture','read'].includes(method)) throw new Error('This API is unavailable in workflows.');
         const tool = tools.find(item => item.name === `desktop_${method}`); validateCall(tool, parameters);
-        if (method === 'system' && parameters.operation === 'control_resume') throw new Error('Resume is forbidden inside workflows. It requires a direct user-requested desktop_system call.');
+        if (method === 'system' && ['control_resume','control_start','control_end'].includes(parameters.operation)) throw new Error('Control lifecycle operations must be direct desktop_system calls, never workflow steps.');
         if (++steps > (args.max_steps ?? 20)) throw Object.assign(new Error('Workflow desktop step budget exceeded.'), { code: 'STEP_LIMIT' });
         if (method === 'capture' || method === 'system' && parameters.operation === 'clipboard_get' && (parameters.image || ['auto','image'].includes(parameters.format))) { if (artifacts.length >= 2) throw new Error('Workflow image budget exceeded.'); }
         if (mutates(method, parameters) && this.context.uncertainty) throw Object.assign(new Error('An earlier action has unresolved delivery. Read the UI and reconcile task context before new input.'), { code: 'RECONCILIATION_REQUIRED' });

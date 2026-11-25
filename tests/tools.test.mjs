@@ -3,6 +3,17 @@ import assert from 'node:assert/strict';
 import { tools, validate, validateCall, toolResult } from '../src/tools.mjs';
 
 const schema = name => tools.find(tool => tool.name === name).inputSchema;
+test('reader continuations cannot silently change target/direction and lifecycle calls cannot hide inside a batch', () => {
+  const read = tools.find(tool => tool.name === 'desktop_read');
+  for (const args of [
+    {operation:'snapshot'}, {operation:'snapshot',window_id:'w',reader_id:'r'},
+    {operation:'collect'}, {operation:'collect',root_ref:'@a',reader_id:'r'},
+    {operation:'collect',reader_id:'r',direction:'up'}, {operation:'collect',root_ref:'@a',budget_ms:12000}
+  ]) assert.throws(() => validateCall(read, args));
+  validateCall(read, {operation:'collect',reader_id:'r',max_pages:2});
+  for (const operation of ['control_resume','control_start','control_end'])
+    assert.throws(() => validateCall(tools.find(tool => tool.name === 'desktop_batch'), {commands:[{tool:'desktop_system',arguments:{operation}}]}));
+});
 test('unknown arguments, oversized observations, and invalid actions fail before native dispatch', () => {
   assert.throws(() => validate(schema('desktop_act'), { action: 'run_shell' }));
   assert.throws(() => validate(schema('desktop_observe'), { window_id: 'w', limit: 10000 }));

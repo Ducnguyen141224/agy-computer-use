@@ -174,8 +174,10 @@ internal sealed class ScrollPattern(UIA.IUIAutomationScrollPattern pattern)
     internal static AutomationPattern Pattern => System.Windows.Automation.ScrollPattern.Pattern;
     internal ScrollPattern Current => this;
     internal double VerticalScrollPercent => AutomationElement.Call(() => pattern.CurrentVerticalScrollPercent);
+    internal double VerticalViewSize => AutomationElement.Call(() => pattern.CurrentVerticalViewSize);
     internal double HorizontalScrollPercent => AutomationElement.Call(() => pattern.CurrentHorizontalScrollPercent);
     internal void Scroll(ScrollAmount horizontal, ScrollAmount vertical) => AutomationElement.Call(() => pattern.Scroll((UIA.ScrollAmount)horizontal, (UIA.ScrollAmount)vertical));
+    internal void SetScrollPercent(double horizontal, double vertical) => AutomationElement.Call(() => pattern.SetScrollPercent(horizontal, vertical));
 }
 internal sealed class ScrollItemPattern(UIA.IUIAutomationScrollItemPattern pattern)
 {

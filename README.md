@@ -36,7 +36,7 @@ Gói có manifest, skill, mcp.json cho Agent Plugins và mcp_config.json tương
 
 ## Hiệu ứng điều khiển và phím ESC
 
-Từ v0.5.0, plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ đen viền sáng cùng vòng hiệu ứng nhấn chuột. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên khi có. Overlay xuyên click và không lấy focus; viền tự ẩn sau 1,8 giây không còn thao tác, và giữ hiện suốt workflow.
+Từ v0.5.0, plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ đen viền sáng cùng vòng hiệu ứng nhấn chuột. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên khi có. Overlay xuyên click và không lấy focus; từ v0.6.0, viền giữ hiện giữa các lần gọi MCP cho đến control_end/ESC/ngắt kết nối. Native một lần gọi không có control_start vẫn tự ẩn sau 1,8 giây.
 
 Từ v0.5.1, con trỏ mặc định là mũi tên **đen viền trắng**, bỏ quầng xanh thường trực. Viền màn hình được giữ tĩnh; con trỏ dùng surface alpha 112×112 pixel trên luồng render riêng, không dùng chung luồng clipboard/shell. Đồng hồ độ phân giải cao nhắm tối đa 120 nhịp gửi frame/giây khi có animation, ngừng khi đứng yên. Chuyển hướng nội suy theo vận tốc đang chạy; lệnh trùng điểm đến không khởi động lại chuyển động. Đây là tối ưu của plugin, không phải cam kết FPS hay bản sao từng pixel của Codex.
 
@@ -56,6 +56,7 @@ Sau khi dừng, agent phải chờ **yêu cầu mới, rõ ràng của người 
 | `desktop_observe` | Cây UIA gọn; đọc theo vùng, giới hạn độ sâu; diff trong RAM |
 | `desktop_find` | Tìm theo role/name, giữ context để phân biệt nhãn trùng |
 | `desktop_act` | Một hành động và một điều kiện xác minh, chờ có giới hạn |
+| `desktop_read` | Đọc trực tiếp văn bản UIA, thu thập nhiều trang và tiếp tục bằng reader_id |
 | `desktop_capture` | Ảnh trong RAM khi cần fallback bằng tọa độ |
 | `desktop_system` | App/cửa sổ, màn hình, clipboard, bề mặt hệ thống, notification, status |
 | `desktop_run` | Workflow JavaScript có biến/điều kiện/vòng lặp, dùng ref vừa tìm ngay trong một lần gọi |
@@ -69,9 +70,9 @@ Luồng cơ bản: windows → observe/find → act kèm expect → đọc phầ
 
 ## Workflow và ngữ cảnh trong RAM
 
-Đọc `desktop_help {"topic":"runtime"}` khi cần workflow; các chủ đề khác gồm core/context/capture/notifications/browser/clipboard/cursor/recovery/permissions. MCP resource `agy://guides/runtime` trả cùng nội dung. Skill chỉ giữ hướng dẫn khởi đầu ngắn; bản plugin có các file references theo chủ đề. Catalog 12 tool và thứ tự schema được cố định suốt phiên, không thay đổi khi nạp hướng dẫn hay đổi session. Điều này tạo điều kiện cho cache của host; không tự chứng minh cache hit.
+Đọc `desktop_help {"topic":"runtime"}` khi cần workflow; các chủ đề khác gồm core/reading/context/capture/notifications/browser/clipboard/cursor/recovery/permissions. MCP resource `agy://guides/runtime` trả cùng nội dung. Skill chỉ giữ hướng dẫn khởi đầu ngắn; bản plugin có các file references theo chủ đề. Catalog 13 tool và thứ tự schema được cố định suốt phiên, không thay đổi khi nạp hướng dẫn hay đổi session. Điều này tạo điều kiện cho cache của host; không tự chứng minh cache hit.
 
-`desktop_run` nhận `code`, `max_steps` (mặc định 20, tối đa 80) và `timeout_ms` (mặc định 12 giây, tối đa 30 giây). Script là JavaScript đồng bộ thông thường; native I/O được QuickJS Asyncify tạm dừng/chạy tiếp. Không dùng async/await, Promise trả về, import, timers hoặc Node API. Chỉ có `desktop.windows/observe/find/act/query/system/capture`, `desktop.one`, `desktop.emit` và object `state` giữ biến giữa những lần chạy thành công trong cùng session.
+`desktop_run` nhận `code`, `max_steps` (mặc định 20, tối đa 80) và `timeout_ms` (mặc định 12 giây, tối đa 30 giây). Script là JavaScript đồng bộ thông thường; native I/O được QuickJS Asyncify tạm dừng/chạy tiếp. Không dùng async/await, Promise trả về, import, timers hoặc Node API. Chỉ có `desktop.windows/observe/find/read/act/query/system/capture`, `desktop.one`, `desktop.emit` và object `state` giữ biến giữa những lần chạy thành công trong cùng session.
 
 Ví dụ **nội dung code** của desktop_run, với state.window đã được đặt từ window_id thật:
 
@@ -239,3 +240,13 @@ Phạm vi là chức năng Windows; macOS/Linux không thuộc yêu cầu. Local
 - `scripts/desktop-smoke.mjs`: kiểm tra xuyên qua MCP trên app thật do dự án tạo.
 
 Repo `vercel-labs/agent-desktop` được tham khảo về vòng lặp observe/act/verify và ý tưởng đọc theo vùng; source triển khai ở đây được viết mới.
+
+## Đọc trực tiếp và tác vụ liên tục (v0.6.0)
+
+MCP tự mở phiên hiển thị khi bắt đầu dùng desktop: viền xanh giữ suốt các lần đọc/thao tác và thời gian model suy nghĩ. Gọi `desktop_system {"operation":"control_end"}` trong finally khi hoàn tất, hủy hoặc bàn giao cho người dùng; ESC vẫn dừng và khóa input. Native/CLI có thể dùng control_start/control_end trực tiếp. Phiên hiển thị không giữ mutex input giữa các lần gọi.
+
+`desktop_read {"operation":"snapshot","window_id":"..."}` lấy văn bản trực tiếp từ UIA/TextPattern/ValuePattern, bỏ qua password, không tạo ảnh. Với vùng cuộn được chọn rõ ràng, gọi collect với root_ref và direction up/down. Kết quả có reader_id khi cần tiếp tục. Giới hạn max_pages/max_chars/budget_ms chỉ chia nội dung thành phần nhỏ; agent tiếp tục cùng reader_id. pause_ms mặc định 100; cuộn theo 65% khung nhìn (fallback bước nhỏ khi thiếu view size) và so khớp phần chồng lặp, giữ các dòng trùng trong một trang.
+
+complete chỉ xác nhận ranh giới cuộn do UIA provider công bố. Nội dung tải từ xa/ảo hóa, trang lặp giống nhau hoặc UIA thiếu vẫn cần kiểm tra mốc đầu/cuối và fallback DOM/ảnh có mục tiêu. Đọc lên trả các trang theo thứ tự đi ngược, dòng bên trong trang theo thứ tự xuôi. Reader hết hạn sau hai phút; end/reset/switch xóa nội dung RAM. MCP không thể ép model của Antigravity tiếp tục khi host/provider đã kết thúc lượt.
+
+Chạy `npm run test:reading` để kiểm tra trên cửa sổ WPF thử nghiệm. AGY_NATIVE_EXECUTABLE cho phép chọn helper build thử; AGY_DESKTOP_TEST_SCOPE (GUID N) cô lập mutex/stop event trong test. Không đặt các biến này trong cấu hình plugin sử dụng hằng ngày.

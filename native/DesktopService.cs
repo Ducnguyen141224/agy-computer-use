@@ -28,12 +28,13 @@ internal sealed partial class DesktopService : IDisposable
     {
         if (workflowLease != null && DateTime.UtcNow >= workflowLeaseDeadline) { ReleaseWorkflowLease(); throw new DesktopError("WORKFLOW_EXPIRED", "Workflow lease expired. Inspect UI; no action was retried."); }
         if (method == "lease") return WorkflowLease(args);
-        using var input = Program.Mutating(method) ? new InputLease() : null;
         Prune();
         ValidateCommand(method, args);
-        var metadata = method == "system" && args.Text("operation") is "status" or "permissions" or "version";
+        using var input = IsControlMutation(method, args) || method == "read" && args.Text("operation") == "collect" ? new InputLease() : null;
+        var metadata = method == "system" && args.Text("operation") is "status" or "permissions" or "version" or "control_status" or "control_stop" or "control_resume" or "control_end";
         if (!metadata) EnsureDesktop();
-        using var activity = IsControlMutation(method, args) ? ControlPresentation.Begin() : null;
+        var reading = method is "windows" or "observe" or "find" or "capture" or "query" or "read";
+        using var activity = IsControlMutation(method, args) || reading && !ControlPresentation.Paused ? ControlPresentation.Begin() : null;
         return method switch
         {
             "windows" => ListWindows(args),
@@ -43,12 +44,13 @@ internal sealed partial class DesktopService : IDisposable
             "capture" => Capture(args),
             "system" => SystemOperation(args),
             "query" => Query(args),
+            "read" => ReadText(args),
             "batch" => Batch(args),
             "session" => Session(args),
             _ => throw new DesktopError("INVALID_ARGUMENT", "Unknown desktop operation.")
         };
     }
-    private static bool IsControlMutation(string method, JsonElement args) => args.Flag("open") || method is "act" or "batch" || method == "system" && args.Text("operation") is not ("status" or "permissions" or "version" or "list_apps" or "list_displays" or "window_info" or "clipboard_get" or "list_surfaces" or "list_notifications" or "cursor_status" or "cursor_config" or "cursor_remove" or "control_status" or "control_resume" or "control_stop");
+    private static bool IsControlMutation(string method, JsonElement args) => args.Flag("open") || method is "act" or "batch" || method == "system" && args.Text("operation") is not ("status" or "permissions" or "version" or "list_apps" or "list_displays" or "window_info" or "clipboard_get" or "list_surfaces" or "list_notifications" or "cursor_status" or "cursor_config" or "cursor_remove" or "control_status" or "control_resume" or "control_stop" or "control_start" or "control_end");
     public void Dispose() { ReleaseWorkflowLease(); ControlPresentation.Close(); CursorOverlay.Close(); Native.ReleaseOwnedInput(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
 
     private static void EnsureDesktop()

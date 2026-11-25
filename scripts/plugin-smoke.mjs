@@ -1,3 +1,4 @@
+import { desktopTestEnv } from '../tests/mcp-env.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,11 +25,11 @@ if (process.argv[2]) {
   assert.ok(installed.mcpServers?.includes('agy-computer-use'), 'Native Antigravity loader must discover the MCP server, not just its skill.');
 }
 const client = new Client({ name: 'installed-plugin-smoke', version: '0.2.0' });
-const transport = new StdioClientTransport({ command: server.command, args: server.args, stderr: 'pipe' });
+const transport = new StdioClientTransport({ env: desktopTestEnv(), command: server.command, args: server.args, stderr: 'pipe' });
 try {
   await client.connect(transport);
   const inventory = await client.listTools();
-  assert.deepEqual(inventory.tools.map(tool => tool.name).sort(), ['act', 'batch', 'capture', 'find', 'observe', 'query', 'session', 'system', 'windows','run','context','help'].map(name => `desktop_${name}`).sort());
+  assert.deepEqual(inventory.tools.map(tool => tool.name).sort(), ['act', 'batch', 'capture', 'find', 'observe', 'query', 'session', 'system', 'windows','read','run','context','help'].map(name => `desktop_${name}`).sort());
   const reply = await client.callTool({ name: 'desktop_system', arguments: { operation: 'status' } });
   assert.equal(reply.isError, false);
   assert.equal(JSON.parse(reply.content[0].text).accessibility, 'UIA3 (CUIAutomation8)');
@@ -38,6 +39,6 @@ try {
   assert.ok(Array.isArray(JSON.parse(windows.content[0].text).windows));
   const runtime = await client.callTool({ name: 'desktop_run', arguments: { code: 'state.installed=true; return {installed:state.installed, platform:desktop.system({operation:"status"}).platform};' } });
   assert.equal(runtime.isError, false, runtime.content[0].text); assert.equal(JSON.parse(runtime.content[0].text).result.platform, 'windows');
-  assert.equal((await client.listResources()).resources.length, 10);
-  process.stdout.write('PASS installed plugin manifest/skill, all twelve tools, ten lazy guides, real UIA3 and isolated workflow runtime connect successfully. No evidence files saved.\n');
+  assert.equal((await client.listResources()).resources.length, 11);
+  process.stdout.write('PASS installed plugin manifest/skill, all thirteen tools, eleven lazy guides, real UIA3 and isolated workflow runtime connect successfully. No evidence files saved.\n');
 } finally { await client.close(); }

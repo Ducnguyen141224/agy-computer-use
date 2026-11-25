@@ -1,3 +1,4 @@
+import { desktopTestEnv } from '../tests/mcp-env.mjs';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -17,7 +18,7 @@ const probe = spawn(executable, ['--control-probe', String(fixture.pid)], { stdi
 const lines = createInterface({ input: probe.stdout });
 const inspect = async command => { const result = once(lines,'line'); probe.stdin.write(command+'\n'); const [line] = await result; const data = JSON.parse(line); assert.ok(!data.error, line); return data; };
 const client = new Client({ name: 'control-smoke', version: '0.5.0' });
-const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs',import.meta.url))], stderr: 'pipe' });
+const transport = new StdioClientTransport({ env: desktopTestEnv(), command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs',import.meta.url))], stderr: 'pipe' });
 const competitor = new NativeBridge();
 let checks = 0;
 const check = (condition, label) => { assert.ok(condition,label); checks++; process.stdout.write(`PASS ${label}\n`); };
@@ -34,8 +35,7 @@ try {
   let message = await find('Message');
   await call('desktop_act',{action:'focus_window',window_id});
   await call('desktop_act',{action:'focus',ref:message.ref});
-  // Keep ownership while the independent GDI observer initializes; an idle indicator
-  // is deliberately allowed to disappear after 1.8s between ordinary tool calls.
+  // Keep the independent GDI observer within a known running workflow.
   const visualHold = call('desktop_run',{code:'desktop.query({operation:"time_wait",timeout_ms:8000}); return true;',timeout_ms:11000});
   visualHold.catch(()=>{}); // Preserve the observer's first error during fixture teardown.
   // Layered-window pixels can be dimmed by the compositor. Verify blue hue and
@@ -103,7 +103,7 @@ try {
   await call('desktop_query',{operation:'get',ref:message.ref,property:'value'});
   await call('desktop_context',{operation:'reconcile',recovery_note:'Independent probe confirmed Escape stopped after the started marker; test explicitly resumes.'});
   const forbidden = await call('desktop_run',{code:'desktop.system({operation:"control_resume"});'},true);
-  check(forbidden.error?.message.includes('forbidden inside workflows'),'workflow scripts cannot resume even when control is active');
+  check(forbidden.error?.message.includes('never workflow steps'),'workflow scripts cannot resume even when control is active');
   const cpu = call('desktop_run',{code:`desktop.act({action:'set_value',ref:${JSON.stringify(message.ref)},text:'cpu'}); while(true){}`,timeout_ms:10000},true);
   await waitProbe('read',v=>v.value==='cpu'); const cpuStop=Date.now(); await inspect('escape');
   const cpuResult = await cpu;
@@ -121,8 +121,9 @@ try {
   window_id=(await call('desktop_windows',{query:title})).windows.find(w=>w.pid===fixture.pid).id; message=await find('Message');
   await call('desktop_act',{action:'set_value',ref:message.ref,text:'resumed'});
   check((await inspect('read')).value==='resumed','explicit resume permits new input after a fresh observation');
-  await delay(2100);
-  check(!(await inspect('visual')).rendered,'indicator hides automatically when idle');
+  await call('desktop_system',{operation:'control_end'});
+  await delay(200);
+  check(!(await inspect('visual')).rendered,'indicator hides on explicit task completion');
   await inspect('escape'); await delay(100);
   check(!(await call('desktop_system',{operation:'control_status'})).paused,'Escape outside active control remains an ordinary app key');
   await call('desktop_act',{action:'set_value',ref:message.ref,text:'closing'});

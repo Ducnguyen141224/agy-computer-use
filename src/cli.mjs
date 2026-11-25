@@ -28,7 +28,7 @@ const systemAliases = { status: 'status', permissions: 'permissions', version: '
 
 try {
   if (command === 'help' || command === '--help') {
-    process.stdout.write('AGY computer use: windows/observe/find/act/query/system/batch/session/capture [--json JSON].\nAliases: snapshot, list-windows, click REF, set-value REF TEXT, press REF Ctrl+A, launch APP, clipboard-get, resize-window --window-id ID --width N --height N.\nCLI refs live in a current-user-only memory daemon (idle timeout 5 minutes). daemon-stop clears its state.\nCapture omits image bytes by default; --png writes PNG bytes to stdout, --include-image includes base64. Nothing is recorded to disk.\n');
+    process.stdout.write('AGY computer use: windows/observe/find/read/act/query/system/batch/session/capture [--json JSON].\nAliases: snapshot, list-windows, click REF, set-value REF TEXT, press REF Ctrl+A, launch APP, clipboard-get, resize-window --window-id ID --width N --height N.\nCLI refs live in a current-user-only memory daemon (idle timeout 5 minutes). daemon-stop clears its state.\nCapture omits image bytes by default; --png writes PNG bytes to stdout, --include-image includes base64. Nothing is recorded to disk.\n');
   } else if (command === 'daemon-stop') {
     process.stdout.write(JSON.stringify(await pipeRequest('shutdown', {}, { ...(options.pipe ? { pipe: options.pipe } : {}), start: false })) + '\n');
   } else {

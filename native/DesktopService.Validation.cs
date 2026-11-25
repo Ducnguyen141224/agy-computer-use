@@ -12,6 +12,12 @@ internal sealed partial class DesktopService
         if (method == "capture" && (args.TryGetProperty("window_id", out _) == args.TryGetProperty("display_id", out _) || args.TryGetProperty("display_id", out _) && args.TryGetProperty("mode", out _))) throw new DesktopError("INVALID_ARGUMENT", "Capture needs exactly one window_id or display_id; display capture does not take mode.");
         void Require(params string[] fields) { foreach (var field in fields) if (!args.TryGetProperty(field, out _)) throw new DesktopError("INVALID_ARGUMENT", $"{field} is required for this operation."); }
         if (method == "windows") { _ = args.Number("limit", 30, 1, 60); _ = args.Text("query"); }
+        if (method == "read")
+        {
+            var operation = args.Text("operation");
+            if (operation == "snapshot" && ((args.Text("window_id") == null && args.Text("root_ref") == null) || new[] { "reader_id", "direction", "max_pages", "pause_ms" }.Any(key => args.TryGetProperty(key, out _)))) throw new DesktopError("INVALID_ARGUMENT", "snapshot needs window_id or root_ref and no collection fields.");
+            if (operation == "collect" && ((args.Text("root_ref") != null) == (args.Text("reader_id") != null) || args.Text("window_id") != null || args.Text("reader_id") != null && args.Text("direction") != null)) throw new DesktopError("INVALID_ARGUMENT", "collect needs exactly one root_ref or reader_id; continuation direction is fixed.");
+        }
         if (method == "act")
         {
             var action = args.Text("action") ?? "";
@@ -92,7 +98,7 @@ internal sealed partial class DesktopService
         if (method == "system")
         {
             var operation = args.Text("operation") ?? "status";
-            if (!new[] { "status", "permissions", "version", "list_displays", "list_apps", "launch", "clipboard_get", "clipboard_set", "clipboard_clear", "clipboard_save", "clipboard_restore", "list_surfaces", "open_surface", "close_surface", "list_notifications", "dismiss_notification", "dismiss_all_notifications", "notification_action", "window_info", "focus_window", "move", "resize", "minimize", "maximize", "restore", "close_window", "close_app", "cursor_config", "cursor_status", "cursor_remove", "control_status", "control_stop", "control_resume" }.Contains(operation)) throw new DesktopError("INVALID_ARGUMENT", "Unsupported system operation.");
+            if (!new[] { "status", "permissions", "version", "list_displays", "list_apps", "launch", "clipboard_get", "clipboard_set", "clipboard_clear", "clipboard_save", "clipboard_restore", "list_surfaces", "open_surface", "close_surface", "list_notifications", "dismiss_notification", "dismiss_all_notifications", "notification_action", "window_info", "focus_window", "move", "resize", "minimize", "maximize", "restore", "close_window", "close_app", "cursor_config", "cursor_status", "cursor_remove", "control_status", "control_stop", "control_resume", "control_start", "control_end" }.Contains(operation)) throw new DesktopError("INVALID_ARGUMENT", "Unsupported system operation.");
             if (new[] { "window_info", "focus_window", "move", "resize", "minimize", "maximize", "restore", "close_window", "close_app", "close_surface" }.Contains(operation)) Require("window_id");
             if (operation == "launch") { Require("app"); _ = args.Text("app", 2048); }
             if (operation == "launch")

@@ -204,9 +204,9 @@ internal sealed partial class DesktopService
         foreach (var command in commands.EnumerateArray())
         {
             var method = command.Text("method");
-            if (method is not ("windows" or "observe" or "find" or "act" or "query" or "system" or "capture")) throw new DesktopError("INVALID_ARGUMENT", "This method cannot be batched.");
+            if (method is not ("windows" or "observe" or "find" or "act" or "query" or "system" or "capture" or "read")) throw new DesktopError("INVALID_ARGUMENT", "This method cannot be batched.");
             ValidateCommand(method, command.GetProperty("params"));
-            if (method == "system" && command.GetProperty("params").Text("operation") == "control_resume") throw new DesktopError("INVALID_ARGUMENT", "Resume must be a direct user-requested operation, never a batch step.");
+            if (method == "system" && command.GetProperty("params").Text("operation") is "control_resume" or "control_start" or "control_end") throw new DesktopError("INVALID_ARGUMENT", "Resume must be a direct user-requested operation, never a batch step.");
         }
         if (commands.EnumerateArray().Count(command => command.Text("method") == "capture") > 4) throw new DesktopError("INVALID_ARGUMENT", "A batch can contain at most four captures.");
         var stop = args.Flag("stop_on_error", true);
@@ -219,6 +219,12 @@ internal sealed partial class DesktopService
             if (timer.ElapsedMilliseconds >= timeout) break;
             var parameters = JsonNode.Parse(command.GetProperty("params").GetRawText())!.AsObject();
             var method = command.Text("method")!;
+            if (method == "read")
+            {
+                var remaining = timeout - (int)timer.ElapsedMilliseconds;
+                if (remaining < 200) break;
+                parameters["budget_ms"] = Math.Min(parameters["budget_ms"]?.GetValue<int>() ?? 5000, remaining);
+            }
             if (method is "act" or "query") parameters["timeout_ms"] = Math.Min(parameters["timeout_ms"]?.GetValue<int>() ?? (method == "act" ? 1800 : 3000), Math.Max(0, timeout - (int)timer.ElapsedMilliseconds));
             try
             {

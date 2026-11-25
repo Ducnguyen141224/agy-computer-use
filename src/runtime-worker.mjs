@@ -25,7 +25,7 @@ const bootstrap = vm.evalCode(`
       return response.data;
     };
     const api = Object.create(null);
-    for (const method of ['windows','observe','find','act','query','system','capture']) api[method] = args => call(method, args);
+    for (const method of ['windows','observe','find','act','query','system','capture','read']) api[method] = args => call(method, args);
     api.one = result => {
       if (!result || result.complete !== true || result.items?.length !== 1) throw new Error('one() requires exactly one candidate in a complete search. Narrow the scope.');
       return result.items[0];

@@ -41,6 +41,7 @@ internal sealed partial class DesktopService
     }
     private void ClearDesktopState()
     {
+        readers.Clear(); ControlPresentation.EndTask();
         windows.Clear(); references.Clear(); observations.Clear(); captures.Clear(); windowGeometry.Clear();
         clipboardSnapshots.Clear();
         cursorProfiles.Clear(); cursorAgent = "default"; cursorRequireAgent = false; CursorOverlay.Set(cursorProfiles, cursorAgent);

@@ -5,6 +5,21 @@ import { DesktopController } from '../src/desktop-controller.mjs';
 import { TaskContext } from '../src/task-context.mjs';
 import { toolResult, tools } from '../src/tools.mjs';
 
+test('a stop discovered in another helper permits recovery reads without restarting control', async () => {
+  const calls = [];
+  const bridge = { generation:1, child:{}, userStopped:false, async request(method, args) {
+    calls.push([method,args.operation]);
+    if (method === 'system' && args.operation === 'control_start') { this.userStopped = true; return {ok:false,error:{code:'USER_STOPPED'}}; }
+    return {ok:true,data:{windows:[]}};
+  }, close() {} };
+  const controller = new DesktopController(bridge);
+  try {
+    assert.equal((await controller.request('desktop_windows', {})).ok, true);
+    assert.equal(bridge.userStopped, true);
+    assert.deepEqual(calls, [['system','control_start'],['windows',undefined]]);
+  } finally { controller.close(); }
+});
+
 test('QuickJS retains guest state while host globals and Function constructors remain isolated', async () => {
   const runtime = new WorkflowRuntime();
   try {
@@ -46,19 +61,19 @@ test('controller queue prevents ordinary calls from interleaving a workflow', as
     const run = controller.request('desktop_run', { code: 'desktop.windows({query:"first"}); desktop.windows({query:"second"}); return 1;' });
     const other = controller.request('desktop_windows', { query: 'outside' });
     assert.equal((await run).data.result, 1); await other;
-    assert.deepEqual(calls, ['session','lease','windows','windows','lease','windows']);
+    assert.deepEqual(calls, ['system','session','lease','windows','windows','lease','system','windows']);
   } finally { controller.close(); }
 });
 
 test('catalog is immutable and complete for both old and new MCP clients', () => {
-  assert.equal(tools.length, 12);
+  assert.equal(tools.length, 13);
   assert.ok(Object.isFrozen(tools)); assert.ok(Object.isFrozen(tools[0].inputSchema.properties));
   assert.throws(() => tools.reverse());
 });
 
 test('cleanup uncertainty cannot be returned as a successful preserved runtime', async () => {
   let invalidated = false;
-  const bridge = { generation: 1, child: {}, async request(method, args) { if (method === 'session') return { ok: true, data: { session_id: 'default' } }; return args.operation === 'begin' ? { ok: true, data: { token: 'lease' } } : { ok: false, error: { code: 'LOST_LEASE' } }; }, close() {}, invalidate() { invalidated = true; this.child = null; } };
+  const bridge = { generation: 1, child: {}, async request(method, args) { if (method === 'system' && args.operation === 'control_start') return {ok:true,data:{active:true}}; if (method === 'session') return { ok: true, data: { session_id: 'default' } }; return args.operation === 'begin' ? { ok: true, data: { token: 'lease' } } : { ok: false, error: { code: 'LOST_LEASE' } }; }, close() {}, invalidate() { invalidated = true; this.child = null; } };
   const controller = new DesktopController(bridge);
   try { const reply = await controller.request('desktop_run', { code: 'state.test=1; return true;' }); assert.equal(reply.data.verification, 'failed'); assert.equal(reply.data.state_preserved, false); assert.equal(reply.data.error.code, 'LEASE_RELEASE_UNKNOWN'); assert.ok(invalidated); }
   finally { controller.close(); }

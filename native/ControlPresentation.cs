@@ -9,7 +9,7 @@ namespace AgyComputerUse;
 internal static class ControlPresentation
 {
     private static readonly EventWaitHandle Stopped = new(false, EventResetMode.ManualReset,
-        "Local\\AgyComputerUse.Stopped." + System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value);
+        "Local\\AgyComputerUse.Stopped." + System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value + ControlScope.Suffix);
     private static readonly HookCallback Callback = Keyboard;
     private static IntPtr hook;
     private static ActivityForm? form;
@@ -19,13 +19,28 @@ internal static class ControlPresentation
     private static bool latestPulse;
     private static int pointQueued;
     private static int owners;
+    private static int taskActive;
     private static long until;
     private static volatile bool visible;
     internal static IntPtr WindowHandle;
     internal static IntPtr PointerWindowHandle;
     internal static bool OwnsWindow(IntPtr window) => window != IntPtr.Zero && (window == WindowHandle || window == PointerWindowHandle);
     internal static bool Paused => Stopped.WaitOne(0);
-    internal static bool Active => !Paused && (Volatile.Read(ref owners) > 0 || Environment.TickCount64 < Interlocked.Read(ref until));
+    internal static bool Active => !Paused && (Volatile.Read(ref taskActive) != 0 || Volatile.Read(ref owners) > 0 || Environment.TickCount64 < Interlocked.Read(ref until));
+    internal static object StartTask()
+    {
+        using var activity = Begin();
+        Interlocked.Exchange(ref taskActive, 1);
+        return Status();
+    }
+    internal static object EndTask()
+    {
+        Interlocked.Exchange(ref taskActive, 0);
+        Interlocked.Exchange(ref until, 0);
+        if (Volatile.Read(ref owners) == 0 && form != null)
+            PresentationDispatcher.Run(() => { form.Rest(); pointer?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
+        return Status();
+    }
     internal static IDisposable Begin()
     {
         Check();
@@ -58,11 +73,13 @@ internal static class ControlPresentation
         if (Paused) throw new DesktopError("USER_STOPPED", "Control was stopped with Escape. Inspect the UI; resume only after a new explicit user instruction.", new { delivery = "unknown", resume = "desktop_system control_resume" });
     }
     internal static void Delay(int milliseconds) { if (Stopped.WaitOne(Math.Max(0, milliseconds))) Check(); }
-    internal static object Status() => new { paused = Paused, active = Active, rendered = visible && WindowHandle != IntPtr.Zero, border = PresentationTheme.EdgeHex, escape_to_stop = true, idle_hide_ms = 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
+    internal static object Status() => new { paused = Paused, active = Active, task_active = Volatile.Read(ref taskActive) != 0 && !Paused, rendered = visible && WindowHandle != IntPtr.Zero, border = PresentationTheme.EdgeHex, escape_to_stop = true, idle_hide_ms = Volatile.Read(ref taskActive) != 0 ? (int?)null : 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
     internal static object Resume() { Stopped.Reset(); return Status(); }
+    internal static void PreserveStop() => Stopped.Set();
     internal static void Stop()
     {
         var first = !Paused;
+        Interlocked.Exchange(ref taskActive, 0);
         Stopped.Set();
         PresentationDispatcher.Run(() => { form?.Rest(); pointer?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
         // The bridge may terminate a blocked helper: release our own input before notifying it.
@@ -87,6 +104,8 @@ internal static class ControlPresentation
     }
     internal static void Close()
     {
+        Interlocked.Exchange(ref taskActive, 0);
+        Interlocked.Exchange(ref until, 0);
         if (form == null && hook == IntPtr.Zero) return;
         PresentationDispatcher.Run(() => { pointer?.Close(); pointer = null; PointerWindowHandle = IntPtr.Zero; form?.Close(); form = null; visible = false; WindowHandle = IntPtr.Zero; if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } return true; });
         PresentationDispatcher.Shutdown();

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 
-const executable = fileURLToPath(new URL('../native/bin/Release/net10.0-windows/AgyComputerUse.exe', import.meta.url));
+const executable = process.env.AGY_NATIVE_EXECUTABLE ?? fileURLToPath(new URL('../native/bin/Release/net10.0-windows/AgyComputerUse.exe', import.meta.url));
 
 export class BridgeError extends Error {
   constructor(code, message, details = {}) {
@@ -32,8 +32,8 @@ export class NativeBridge extends EventEmitter {
     const operation = this.tail.then(() => {
       if (signal?.aborted) throw new BridgeError('CANCELLED', 'Request cancelled before execution.', { delivery: 'not_sent' });
       if (this.closed) throw new BridgeError('CLOSED', 'Desktop server is closed.');
-      const readonly = method === 'system' && ['status','permissions','version','control_status','control_stop','control_resume','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status'].includes(params.operation);
-      if (this.userStopped && (params.open === true || ['act','batch'].includes(method) || method === 'system' && !readonly || method === 'lease' && params.operation === 'begin')) throw new BridgeError('USER_STOPPED', 'Escape stopped control. Resume only after a new explicit user instruction.', { delivery: 'not_sent' });
+      const readonly = method === 'system' && ['status','permissions','version','control_status','control_stop','control_resume','control_end','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status'].includes(params.operation);
+      if (this.userStopped && (params.open === true || ['act','batch'].includes(method) || method === 'read' && params.operation === 'collect' || method === 'system' && !readonly || method === 'lease' && params.operation === 'begin')) throw new BridgeError('USER_STOPPED', 'Escape stopped control. Resume only after a new explicit user instruction.', { delivery: 'not_sent' });
       return this.#send(method, params, signal).then(reply => {
         if (method === 'system' && params.operation === 'control_resume' && reply.ok) this.userStopped = false;
         if (method === 'system' && ['status','permissions','version','control_status'].includes(params.operation) && reply.ok && this.userStopped) { if (reply.data.control) reply.data.control.paused = true; else reply.data.paused = true; }
@@ -46,7 +46,7 @@ export class NativeBridge extends EventEmitter {
 
   #start() {
     if (this.child) return;
-    const child = spawn(this.command, this.args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(this.command, [...this.args, ...(this.userStopped ? ['--control-paused'] : [])], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     this.generation++;
     this.child = child;
     let buffer = '';
@@ -99,7 +99,7 @@ export class NativeBridge extends EventEmitter {
     this.#start();
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
-      const mutating = ['act', 'system', 'batch'].includes(method);
+      const mutating = ['act', 'system', 'batch', 'read'].includes(method);
       const timer = setTimeout(() => this.#reset(new BridgeError('HELPER_TIMEOUT', 'Windows accessibility timed out. The helper was restarted; list windows again. Do not repeat input until its effect is checked.', { delivery: mutating ? 'unknown' : 'not_sent' })), this.timeoutMs);
       const onAbort = () => this.#reset(new BridgeError('CANCELLED', 'Operation interrupted. List windows and inspect the current state before retrying.', { delivery: mutating ? 'unknown' : 'not_sent' }));
       const cleanup = () => {

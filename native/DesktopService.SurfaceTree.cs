@@ -34,7 +34,7 @@ internal sealed partial class DesktopService
         {
             try
             {
-                if (handle == CursorOverlay.WindowHandle || !Native.IsWindowVisible(handle) || Native.IsCloaked(handle)) return true;
+                if (handle == CursorOverlay.WindowHandle || ControlPresentation.OwnsWindow(handle) || !Native.IsWindowVisible(handle) || Native.IsCloaked(handle)) return true;
                 Native.GetWindowThreadProcessId(handle, out var pid);
                 if (selected != null && pid != selected.Pid) return true;
                 var kind = SurfaceKind(handle, (int)pid);

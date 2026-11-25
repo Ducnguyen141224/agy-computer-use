@@ -31,6 +31,7 @@ internal static class SchemaValidation
         var types = schema.GetProperty("type");
         if (!(types.ValueKind == JsonValueKind.Array ? types.EnumerateArray().Any(type => Type(type.GetString())) : Type(types.GetString()))) throw new DesktopError("INVALID_ARGUMENT", path + " has the wrong type.");
         if (schema.TryGetProperty("enum", out var choices) && !choices.EnumerateArray().Any(choice => choice.ValueKind == value.ValueKind && choice.GetString() == value.GetString())) throw new DesktopError("INVALID_ARGUMENT", path + " is not a supported value.");
+        if (value.ValueKind == JsonValueKind.String && schema.TryGetProperty("minLength", out var minLen) && value.GetString()!.Length < minLen.GetInt32()) throw new DesktopError("INVALID_ARGUMENT", path + " is too short.");
         if (value.ValueKind == JsonValueKind.String && schema.TryGetProperty("maxLength", out var length) && value.GetString()!.Length > length.GetInt32()) throw new DesktopError("INVALID_ARGUMENT", path + " is too long.");
         if (value.ValueKind == JsonValueKind.String && schema.TryGetProperty("pattern", out var pattern) && !System.Text.RegularExpressions.Regex.IsMatch(value.GetString()!, pattern.GetString()!, System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100))) throw new DesktopError("INVALID_ARGUMENT", path + " has an invalid format.");
         if (value.ValueKind == JsonValueKind.Number)

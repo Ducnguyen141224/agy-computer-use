@@ -67,8 +67,13 @@ internal sealed partial class DesktopService
             if (children.Count > 0)
             {
                 if (depth >= 40) { complete = false; continue; }
-                for (var i = children.Count - 1; i >= 0; i--) stack.Push((children[i], depth + 1));
-                continue;
+                var scrollbarsOnly = (current.ControlType == ControlType.Document || current.ControlType == ControlType.Edit)
+                    && children.All(c => c.Current.ControlType == ControlType.ScrollBar);
+                if (!scrollbarsOnly)
+                {
+                    for (var i = children.Count - 1; i >= 0; i--) stack.Push((children[i], depth + 1));
+                    continue;
+                }
             }
             string? text = null;
             if (element.TryGetCurrentPattern(TextPattern.Pattern, out var document)) text = ((TextPattern)document).DocumentRange.GetText(maxChars + 1);
@@ -159,7 +164,7 @@ internal sealed partial class DesktopService
                 scrolled = true;
                 reader.NeedsScroll = false;
                 ControlPresentation.Delay(args.Number("pause_ms", 100, 50, 500));
-                if (scrolling.Current.VerticalScrollPercent == before) { reason = "scroll_stalled"; break; }
+                if (before >= 0 && scrolling.Current.VerticalScrollPercent == before) { reason = "scroll_stalled"; break; }
             }
             var page = ReadPage(entry.Element, 50000, clock, budget); pages++; nodes += page.Nodes;
             var overlap = reader.Direction == "down" ? PageOverlap(reader.Previous, page.Lines) : PageOverlap(page.Lines, reader.Previous);

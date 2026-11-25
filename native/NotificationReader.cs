@@ -12,6 +12,38 @@ internal static class NotificationReader
     }
     internal sealed record AppGroup(string App, AutomationElement Dismiss);
     internal sealed record Scan(Card[] Cards, AppGroup[] Groups, bool Complete, bool Recognized);
+    internal sealed record WinRtNotification(uint Id, string App, string Title, string Body);
+
+    internal static (string Status, WinRtNotification[] Items) TryReadWinRt()
+    {
+        try
+        {
+            var listener = Windows.UI.Notifications.Management.UserNotificationListener.Current;
+            var access = listener.GetAccessStatus();
+            var statusName = access.ToString().ToLowerInvariant();
+            if (access != Windows.UI.Notifications.Management.UserNotificationListenerAccessStatus.Allowed)
+                return (statusName, []);
+            var list = listener.GetNotificationsAsync(Windows.UI.Notifications.NotificationKinds.Toast)
+                .AsTask().WaitAsync(TimeSpan.FromMilliseconds(1500)).GetAwaiter().GetResult();
+            var result = new List<WinRtNotification>();
+            foreach (var note in list)
+            {
+                var app = "";
+                try { app = note.AppInfo?.DisplayInfo?.DisplayName ?? ""; } catch { }
+                var toast = note.Notification?.Visual?.GetBinding(Windows.UI.Notifications.KnownNotificationBindings.ToastGeneric);
+                var texts = toast?.GetTextElements().Select(t => t.Text).Where(s => !string.IsNullOrWhiteSpace(s)).ToArray() ?? [];
+                var title = texts.Length > 0 ? texts[0] : "";
+                var body = texts.Length > 1 ? string.Join("\n", texts.Skip(1)) : "";
+                result.Add(new(note.Id, app, title, body));
+            }
+            return (statusName, result.ToArray());
+        }
+        catch
+        {
+            return ("unavailable", []);
+        }
+    }
+
     internal static Scan Read(AutomationElement root)
     {
         var timer = Stopwatch.StartNew();
@@ -22,32 +54,33 @@ internal static class NotificationReader
         var walker = TreeWalker.ControlViewWalker;
         var complete = true;
         var recognized = false;
-        queue.Enqueue((root, 0, null, false, false, []));
+        var cachedRoot = root.BuildUpdatedCache();
+        queue.Enqueue((cachedRoot, 0, null, false, false, []));
         while (queue.Count > 0)
         {
             if (nodes.Count >= 600 || timer.ElapsedMilliseconds >= 2000) { complete = false; break; }
             var (element, depth, row, inList, inButton, groups) = queue.Dequeue();
             try
             {
-                var current = element.Current;
-                if (current.AutomationId == "MainListView") { recognized = true; inList = true; }
-                if (row == null && current.ControlType == ControlType.Group) groups = [..groups, string.Join(".", element.GetRuntimeId())];
-                if (inList && current.ControlType == ControlType.ListItem)
+                var snap = element.ReadCached();
+                if (snap.AutomationId == "MainListView") { recognized = true; inList = true; }
+                if (row == null && snap.ControlType == ControlType.Group) groups = [..groups, snap.RuntimeId];
+                if (inList && snap.ControlType == ControlType.ListItem)
                 {
-                    row = string.Join(".", element.GetRuntimeId());
+                    row = snap.RuntimeId;
                     rows[row] = element;
                     rowGroups[row] = groups;
                 }
-                inButton |= current.ControlType == ControlType.Button;
-                var id = current.AutomationId;
-                nodes.Add((element, id, current.Name, row, inButton, groups, current.ControlType.Id, current.IsEnabled, id == "DismissButton" ? string.Join(".", element.GetRuntimeId()) : null));
-                var child = walker.GetFirstChild(element);
+                inButton |= snap.ControlType == ControlType.Button;
+                var id = snap.AutomationId;
+                nodes.Add((element, id, snap.Name, row, inButton, groups, snap.ControlTypeId, snap.IsEnabled, id == "DismissButton" ? snap.RuntimeId : null));
+                var child = walker.GetFirstChildCached(element);
                 if (depth >= 20) { if (child != null) complete = false; continue; }
                 for (var count = 0; child != null; count++)
                 {
                     if (count >= 600 || nodes.Count + queue.Count >= 600 || timer.ElapsedMilliseconds >= 2000) { complete = false; break; }
                     queue.Enqueue((child, depth + 1, row, inList, inButton, groups));
-                    child = walker.GetNextSibling(child);
+                    child = walker.GetNextSiblingCached(child);
                 }
             }
             catch (ElementNotAvailableException) { complete = false; }

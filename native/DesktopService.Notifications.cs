@@ -33,7 +33,7 @@ internal sealed partial class DesktopService
                 var exists = matching.Length > 0;
                 if (exists == present && (exists || list.Value.GetProperty("complete").GetBoolean())) return new { verification = "passed", elapsed_ms = timer.ElapsedMilliseconds, new_only = newOnly, matching, state = list };
             }
-            catch (DesktopError error) when (error.Code is "SURFACE_NOT_FOUND" or "SURFACE_NOT_SUPPORTED" or "WINDOW_NOT_FOUND" or "WINDOW_CHANGED") { unavailable = error.Code; }
+            catch (DesktopError error) when (error.Code is "SURFACE_NOT_FOUND" or "SURFACE_NOT_SUPPORTED" or "WINDOW_NOT_FOUND" or "WINDOW_CHANGED" or "STALE_REF") { unavailable = error.Code; }
             catch (ElementNotAvailableException) { unavailable = "SURFACE_CHANGED"; }
             if (timer.ElapsedMilliseconds >= timeout) break;
             ControlPresentation.Delay(100);
@@ -64,7 +64,16 @@ internal sealed partial class DesktopService
         if (args.Flag("open")) _ = OpenSurface(JsonSerializer.SerializeToElement(new { surface = "action_center" }));
         if (operation == "list")
         {
-            var window = NotificationWindow(args.Text("window_id"));
+            var requestedWindowId = args.Text("window_id");
+            var (winrtStatus, winrtItems) = requestedWindowId == null ? NotificationReader.TryReadWinRt() : ("skipped", []);
+            if (requestedWindowId == null && winrtStatus == "allowed")
+            {
+                var limitWinRt = args.Number("limit", 30, 1, 80);
+                var filteredWinRt = winrtItems.Where(card => (args.Text("app", 2048) is not string app || card.App.Contains(app, StringComparison.OrdinalIgnoreCase)) && (args.Text("text") is not string text || (card.Title + "\n" + card.Body).Contains(text, StringComparison.OrdinalIgnoreCase))).ToArray();
+                var winrtList = filteredWinRt.Take(limitWinRt).Select(card => new { id = card.Id, app = card.App, title = card.Title, body = card.Body.Length == 0 ? null : card.Body }).ToArray();
+                return new { source = "winrt_listener", winrt_status = winrtStatus, notifications = winrtList, count = winrtList.Length, complete = filteredWinRt.Length <= limitWinRt };
+            }
+            var window = NotificationWindow(requestedWindowId);
             var root = AutomationElement.FromHandle(window.Handle);
             var scan = NotificationReader.Read(root);
             if (!scan.Recognized) throw new DesktopError("SURFACE_NOT_SUPPORTED", "The active shell panel does not expose the recognized notification list. Use desktop_observe for this Windows build.");
@@ -93,7 +102,7 @@ internal sealed partial class DesktopService
                 }
             }
             var clear = root.FindAll(TreeScope.Descendants, new PropertyCondition(AutomationElement.AutomationIdProperty, "ClearAllButton"));
-            return new { window_id = window.Id, notifications = result, count = result.Count, complete, dismiss_all_ref = clear.Count == 1 ? AddRef(window, clear[0]) : null, scope = "materialized notification cards in the active shell accessibility tree; collapsed/virtualized groups may require expansion" };
+            return new { window_id = window.Id, winrt_status = winrtStatus, notifications = result, count = result.Count, complete, dismiss_all_ref = clear.Count == 1 ? AddRef(window, clear[0]) : null, scope = "materialized notification cards in the active shell accessibility tree; collapsed/virtualized groups may require expansion" };
         }
         if (operation == "dismiss_all" && args.Text("app", 2048) is string appFilter)
         {

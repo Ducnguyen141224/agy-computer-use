@@ -14,17 +14,21 @@ internal static class ControlPresentation
     private static IntPtr hook;
     private static ActivityForm? form;
     private static PointerPresenter? pointer;
+    private static HighlightPresenter? highlight;
+    private static string? bannerLabel;
     private static readonly object pointGate = new();
     private static Point latestPoint;
     private static bool latestPulse;
     private static int pointQueued;
     private static int owners;
     private static int taskActive;
+    private static int stopNotified;
     private static long until;
     private static volatile bool visible;
     internal static IntPtr WindowHandle;
     internal static IntPtr PointerWindowHandle;
-    internal static bool OwnsWindow(IntPtr window) => window != IntPtr.Zero && (window == WindowHandle || window == PointerWindowHandle);
+    internal static IntPtr HighlightWindowHandle;
+    internal static bool OwnsWindow(IntPtr window) => window != IntPtr.Zero && (window == WindowHandle || window == PointerWindowHandle || window == HighlightWindowHandle);
     internal static bool Paused => Stopped.WaitOne(0);
     internal static bool Active => !Paused && (Volatile.Read(ref taskActive) != 0 || Volatile.Read(ref owners) > 0 || Environment.TickCount64 < Interlocked.Read(ref until));
     internal static object StartTask()
@@ -38,7 +42,7 @@ internal static class ControlPresentation
         Interlocked.Exchange(ref taskActive, 0);
         Interlocked.Exchange(ref until, 0);
         if (Volatile.Read(ref owners) == 0 && form != null)
-            PresentationDispatcher.Run(() => { form.Rest(); pointer?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
+            PresentationDispatcher.Run(() => { form.Rest(); pointer?.Rest(); highlight?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
         return Status();
     }
     internal static IDisposable Begin()
@@ -54,10 +58,11 @@ internal static class ControlPresentation
             }
             form ??= new ActivityForm();
             pointer ??= new PointerPresenter();
+            highlight ??= new HighlightPresenter();
             Interlocked.Increment(ref owners);
             Interlocked.Exchange(ref until, Environment.TickCount64 + 1800);
-            try { form.Wake(); pointer.Wake(); visible = true; WindowHandle = form.Handle; PointerWindowHandle = pointer.Handle; }
-            catch { Interlocked.Decrement(ref owners); form.Rest(); pointer.Rest(); throw; }
+            try { form.Wake(); pointer.Wake(); visible = true; WindowHandle = form.Handle; PointerWindowHandle = pointer.Handle; HighlightWindowHandle = highlight.Handle; }
+            catch { Interlocked.Decrement(ref owners); form.Rest(); pointer.Rest(); highlight.Rest(); throw; }
             CursorOverlay.Suspend(false);
             return true;
         });
@@ -66,7 +71,7 @@ internal static class ControlPresentation
     private sealed class Activity : IDisposable
     {
         private bool disposed;
-        public void Dispose() { if (disposed) return; disposed = true; Interlocked.Decrement(ref owners); Interlocked.Exchange(ref until, Environment.TickCount64 + 1800); }
+        public void Dispose() { if (disposed) return; disposed = true; Interlocked.Decrement(ref owners); if (!Paused) Interlocked.Exchange(ref until, Environment.TickCount64 + 1800); }
     }
     internal static void Check()
     {
@@ -74,16 +79,28 @@ internal static class ControlPresentation
     }
     internal static void Delay(int milliseconds) { if (Stopped.WaitOne(Math.Max(0, milliseconds))) Check(); }
     internal static object Status() => new { paused = Paused, active = Active, task_active = Volatile.Read(ref taskActive) != 0 && !Paused, rendered = visible && WindowHandle != IntPtr.Zero, border = PresentationTheme.EdgeHex, escape_to_stop = true, idle_hide_ms = Volatile.Read(ref taskActive) != 0 ? (int?)null : 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
-    internal static object Resume() { Stopped.Reset(); return Status(); }
+    internal static object Resume() { Interlocked.Exchange(ref stopNotified, 0); Stopped.Reset(); return Status(); }
     internal static void PreserveStop() => Stopped.Set();
     internal static void Stop()
     {
-        var first = !Paused;
         Interlocked.Exchange(ref taskActive, 0);
         Stopped.Set();
-        PresentationDispatcher.Run(() => { form?.Rest(); pointer?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
+        var first = Interlocked.Exchange(ref stopNotified, 1) == 0;
+        PresentationDispatcher.Post(() => { form?.Rest(); pointer?.Rest(); highlight?.Rest(); visible = false; CursorOverlay.Suspend(true); });
         // The bridge may terminate a blocked helper: release our own input before notifying it.
         ThreadPool.QueueUserWorkItem(_ => { Native.ReleaseOwnedInput(); if (first) Program.ControlStopped(); });
+    }
+    internal static void SetBanner(string? text)
+    {
+        var normalized = string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        if (bannerLabel == normalized) return;
+        bannerLabel = normalized;
+        if (form != null) PresentationDispatcher.Post(() => form?.RefreshBanner());
+    }
+    internal static void FlashHighlight(Rectangle bounds)
+    {
+        if (!Active || CursorOverlay.HasEnabledProfile || bounds.Width <= 0 || bounds.Height <= 0) return;
+        PresentationDispatcher.Post(() => { if (Active && !CursorOverlay.HasEnabledProfile) highlight?.Flash(bounds); });
     }
     internal static void Pointer(int x, int y, bool pulse = false)
     {
@@ -100,14 +117,14 @@ internal static class ControlPresentation
     internal static void ProfilesChanged()
     {
         if (form == null) return;
-        PresentationDispatcher.Post(() => { if (CursorOverlay.HasEnabledProfile) pointer?.Rest(); else if (Active) pointer?.Wake(); });
+        PresentationDispatcher.Post(() => { if (CursorOverlay.HasEnabledProfile) { pointer?.Rest(); highlight?.Rest(); } else if (Active) pointer?.Wake(); });
     }
     internal static void Close()
     {
         Interlocked.Exchange(ref taskActive, 0);
         Interlocked.Exchange(ref until, 0);
         if (form == null && hook == IntPtr.Zero) return;
-        PresentationDispatcher.Run(() => { pointer?.Close(); pointer = null; PointerWindowHandle = IntPtr.Zero; form?.Close(); form = null; visible = false; WindowHandle = IntPtr.Zero; if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } return true; });
+        PresentationDispatcher.Run(() => { highlight?.Close(); highlight = null; HighlightWindowHandle = IntPtr.Zero; pointer?.Close(); pointer = null; PointerWindowHandle = IntPtr.Zero; form?.Close(); form = null; visible = false; WindowHandle = IntPtr.Zero; if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } return true; });
         PresentationDispatcher.Shutdown();
     }
     private static IntPtr Keyboard(int code, IntPtr message, IntPtr data)
@@ -136,6 +153,7 @@ internal static class ControlPresentation
         internal long Paints;
         private LayeredSurface? artwork;
         private Rectangle drawnBounds;
+        private string? drawnBanner;
         internal ActivityForm()
         {
             Text = "AGY control indicator"; ShowInTaskbar = false; FormBorderStyle = FormBorderStyle.None;
@@ -143,7 +161,7 @@ internal static class ControlPresentation
             AutoScaleMode = AutoScaleMode.None; TopMost = true;
             clock.Tick += (_, _) =>
             {
-                if (!Active) { Rest(); pointer?.Rest(); visible = false; if (Paused) CursorOverlay.Suspend(true); return; }
+                if (!Active) { Rest(); pointer?.Rest(); highlight?.Rest(); visible = false; if (Paused) CursorOverlay.Suspend(true); return; }
                 if (Bounds != SystemInformation.VirtualScreen) { Bounds = SystemInformation.VirtualScreen; DrawArtwork(); }
                 if (!Visible) { Wake(); visible = true; }
             };
@@ -151,19 +169,20 @@ internal static class ControlPresentation
         }
         internal void Wake() { clock.Start(); if (!Visible) { DrawArtwork(); Show(); } }
         internal void Rest() { clock.Stop(); if (Visible) Hide(); }
+        internal void RefreshBanner() { if (Visible && drawnBanner != bannerLabel) DrawArtwork(); }
         protected override bool ShowWithoutActivation => true;
         protected override CreateParams CreateParams { get { var p = base.CreateParams; p.ExStyle |= 0x080800A0; return p; } }
         protected override void WndProc(ref Message m) { if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; } if (m.Msg == 0x21) { m.Result = new IntPtr(3); return; } base.WndProc(ref m); }
         private void DrawArtwork()
         {
             var bounds = SystemInformation.VirtualScreen;
-            if (artwork == null || drawnBounds != bounds)
+            if (artwork == null || drawnBounds != bounds || drawnBanner != bannerLabel)
             {
-                artwork?.Dispose(); artwork = new LayeredSurface(bounds.Width, bounds.Height); drawnBounds = bounds;
+                artwork?.Dispose(); artwork = new LayeredSurface(bounds.Width, bounds.Height); drawnBounds = bounds; drawnBanner = bannerLabel;
                 var g = artwork.Graphics; g.Clear(Color.Transparent); g.SmoothingMode = SmoothingMode.AntiAlias;
                 g.TranslateTransform(-bounds.Left, -bounds.Top);
                 foreach (var screen in Screen.AllScreens) PresentationTheme.DrawFrame(g, screen.Bounds);
-                PresentationTheme.DrawLabel(g, Screen.PrimaryScreen!.Bounds); Paints++;
+                PresentationTheme.DrawLabel(g, Screen.PrimaryScreen!.Bounds, drawnBanner); Paints++;
             }
             artwork.Present(Handle, bounds.Left, bounds.Top);
         }

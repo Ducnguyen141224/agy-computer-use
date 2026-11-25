@@ -15,12 +15,13 @@ internal sealed partial class DesktopService : IDisposable
     private readonly Dictionary<string, ElementEntry> references = new();
     private readonly Dictionary<string, Observation> observations = new();
     private readonly Dictionary<string, CaptureEntry> captures = new();
+    private readonly Dictionary<int, (long Started, long CheckedAt)> processStartCache = new();
     private long sequence;
     private static readonly TimeSpan RefLifetime = TimeSpan.FromMinutes(2);
     private sealed record WindowEntry(string Id, IntPtr Handle, int Pid, long Started);
     private sealed record ElementEntry(string Ref, WindowEntry Window, AutomationElement Element, string RuntimeId, int ElementPid, long ElementStarted, int Type, string Name, string AutomationId, string Ancestry, DateTime Expires);
     private sealed record Observation(string WindowId, string Scope, bool Complete, List<UiItem> Items, DateTime Created);
-    private sealed record CaptureEntry(WindowEntry? Window, Native.Rect Rect, int ImageWidth, int ImageHeight, DateTime Created, string? DisplayId = null, Dictionary<string, Native.Rect>? WindowBounds = null);
+    private sealed record CaptureEntry(WindowEntry? Window, Native.Rect Rect, int ImageWidth, int ImageHeight, DateTime Created, string? DisplayId = null, Dictionary<string, Native.Rect>? WindowBounds = null, List<MarkEntry>? Marks = null);
     private sealed record ItemBounds(int X, int Y, int Width, int Height);
     private sealed record UiItem(string Ref, string Role, string Name, string? Context, string? Value, bool? Enabled, bool? Offscreen, bool? Password, bool? Checked, bool? Selected, string? Expanded, bool? More, ItemBounds? Bounds);
 
@@ -51,14 +52,14 @@ internal sealed partial class DesktopService : IDisposable
         };
     }
     private static bool IsControlMutation(string method, JsonElement args) => args.Flag("open") || method is "act" or "batch" || method == "system" && args.Text("operation") is not ("status" or "permissions" or "version" or "list_apps" or "list_displays" or "window_info" or "clipboard_get" or "list_surfaces" or "list_notifications" or "cursor_status" or "cursor_config" or "cursor_remove" or "control_status" or "control_resume" or "control_stop" or "control_start" or "control_end");
-    public void Dispose() { ReleaseWorkflowLease(); ControlPresentation.Close(); CursorOverlay.Close(); Native.ReleaseOwnedInput(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
+    public void Dispose() { ReleaseWorkflowLease(); ControlPresentation.Close(); CursorOverlay.Close(); WindowCapture.DisposeShared(); Native.ReleaseOwnedInput(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
 
     private static void EnsureDesktop()
     {
         if (!Native.InteractiveDesktop()) throw new DesktopError("DESKTOP_UNAVAILABLE", "The default interactive desktop is unavailable, locked, or differs from the helper desktop.");
     }
 
-    private object ListWindows(JsonElement args)
+    internal object ListWindows(JsonElement args)
     {
         var query = args.Text("query") ?? "";
         var limit = args.Number("limit", 30, 1, 60);
@@ -123,6 +124,47 @@ internal sealed partial class DesktopService : IDisposable
         return reference;
     }
 
+    private string AddRef(WindowEntry window, AutomationElement element, AutomationElement.CachedSnapshot snap, string ancestry)
+    {
+        var reference = $"@{epoch}:{++sequence}";
+        references[reference] = new(reference, window, element, snap.RuntimeId, snap.ProcessId, ProcessStartedCached(snap.ProcessId), snap.ControlTypeId, snap.Name, snap.AutomationId, ancestry, DateTime.UtcNow + RefLifetime);
+        return reference;
+    }
+
+    private long ProcessStartedCached(int pid)
+    {
+        var now = Environment.TickCount64;
+        if (processStartCache.TryGetValue(pid, out var cached) && now - cached.CheckedAt < 5000) return cached.Started;
+        var started = ProcessStarted(pid);
+        if (processStartCache.Count >= 256) processStartCache.Clear();
+        processStartCache[pid] = (started, now);
+        return started;
+    }
+
+    private sealed record AncestryChain(string Part, AncestryChain? Next);
+    private static AncestryChain? AncestryChainFrom(AutomationElement element, WindowEntry window)
+    {
+        var parts = new List<string>();
+        var parent = TreeWalker.ControlViewWalker.GetParent(element);
+        for (var depth = 0; parent != null && depth < 64; depth++)
+        {
+            var current = parent.Current;
+            parts.Add($"{RuntimeId(parent)}:{current.ControlType.Id}:{current.AutomationId}:{current.Name}");
+            if (current.NativeWindowHandle == window.Handle.ToInt64()) break;
+            parent = TreeWalker.ControlViewWalker.GetParent(parent);
+        }
+        AncestryChain? chain = null;
+        for (var i = parts.Count - 1; i >= 0; i--) chain = new(parts[i], chain);
+        return chain;
+    }
+    private static string FormatChain(AncestryChain? chain)
+    {
+        if (chain == null) return "";
+        var parts = new List<string>();
+        for (var cur = chain; cur != null && parts.Count < 64; cur = cur.Next) parts.Add(cur.Part);
+        return string.Join("|", parts);
+    }
+
     private static string RuntimeId(AutomationElement element) => string.Join(".", element.GetRuntimeId());
     private static long ProcessStarted(int pid)
     {
@@ -147,14 +189,15 @@ internal sealed partial class DesktopService : IDisposable
     private static string Role(AutomationElement element) => element.Current.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
     private static string Trim(string? value, int max) => value == null ? "" : value.Length <= max ? value : value[..max] + "…";
 
-    private object Observe(JsonElement args, bool find)
+    internal object Observe(JsonElement args, bool find)
     {
         var rootRef = args.Text("root_ref");
         ElementEntry? rootEntry = rootRef == null ? null : Resolve(rootRef);
         var window = GetWindow(args.Text("window_id") ?? rootEntry?.Window.Id);
         if (rootEntry != null && rootEntry.Window.Id != window.Id) throw new DesktopError("INVALID_ARGUMENT", "root_ref belongs to another window.");
         if (Native.IsIconic(window.Handle)) throw new DesktopError("WINDOW_MINIMIZED", "Restore the window with desktop_act focus_window before observing.");
-        var root = rootEntry?.Element ?? AutomationElement.FromHandle(window.Handle);
+        var root = rootEntry != null ? rootEntry.Element.BuildUpdatedCache() : AutomationElement.FromHandleBuildCache(window.Handle);
+        var rootChain = rootEntry != null ? AncestryChainFrom(rootEntry.Element, window) : null;
         var depth = args.Number("depth", find ? 12 : 3, 1, 50);
         var limit = args.Number("limit", find ? 12 : 40, 1, 80);
         var role = args.Text("role") is string requestedRole ? NormalizeRole(requestedRole) : null;
@@ -171,23 +214,23 @@ internal sealed partial class DesktopService : IDisposable
         var complete = true;
         var stopwatch = Stopwatch.StartNew();
         var budgetMs = args.Number("budget_ms", 2500, 200, 5000);
-        var queue = new Queue<(AutomationElement Element, int Depth, string Context)>();
-        queue.Enqueue((root, 0, ""));
+        var queue = new Queue<(AutomationElement Element, int Depth, string Context, AncestryChain? Chain)>();
+        queue.Enqueue((root, 0, "", rootChain));
         var walker = TreeWalker.ControlViewWalker;
         while (queue.Count != 0)
         {
             if (visited >= 700 || stopwatch.ElapsedMilliseconds > budgetMs) { complete = false; break; }
-            var (element, level, context) = queue.Dequeue();
+            var (element, level, context, chain) = queue.Dequeue();
             try
             {
                 visited++;
-                var current = element.Current;
-                var elementRole = Role(element);
-                var elementName = current.Name;
-                var isInteractive = IsInteractive(element);
+                var snap = element.ReadCached();
+                var elementRole = snap.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
+                var elementName = snap.Name;
+                var isInteractive = IsInteractive(snap.ControlType);
                 var roleMatches = role == null || elementRole == role;
                 var nameMatches = name == null || (exact ? string.Equals(elementName, name, StringComparison.OrdinalIgnoreCase) : elementName.Contains(name, StringComparison.OrdinalIgnoreCase));
-                var child = walker.GetFirstChild(element);
+                var child = walker.GetFirstChildCached(element);
                 var more = child != null && level >= depth;
                 var include = roleMatches && nameMatches && (!find || ExtraFilters(element, args, exact, ref complete)) && (!interactiveOnly || isInteractive || more || level == 0);
                 if (include)
@@ -198,16 +241,21 @@ internal sealed partial class DesktopService : IDisposable
                     if (selected)
                     {
                         if (items.Count == limit) { complete = false; break; }
-                        items.Add(ReadItem(AddRef(window, element), element, context, more, window, includeBounds));
+                        var resolvedChain = level == 0 && rootEntry == null ? (chain ??= AncestryChainFrom(element, window)) : chain;
+                        items.Add(ReadItem(AddRef(window, element, snap, FormatChain(resolvedChain)), element, snap, context, more, window, includeBounds));
                     }
                 }
                 if (level >= depth) { if (child != null) complete = false; continue; }
                 var nextContext = string.IsNullOrWhiteSpace(elementName) || level == 0 ? context : Trim(string.IsNullOrEmpty(context) ? elementName : $"{context} / {elementName}", 200);
+                var selfPart = $"{snap.RuntimeId}:{snap.ControlTypeId}:{snap.AutomationId}:{snap.Name}";
+                var childChain = snap.NativeWindowHandle == window.Handle.ToInt64()
+                    ? new AncestryChain(selfPart, null)
+                    : new AncestryChain(selfPart, level == 0 && rootEntry == null && chain == null ? AncestryChainFrom(element, window) : chain);
                 while (child != null)
                 {
                     if (queue.Count + visited >= 700 || stopwatch.ElapsedMilliseconds > budgetMs) { complete = false; break; }
-                    queue.Enqueue((child, level + 1, nextContext));
-                    child = walker.GetNextSibling(child);
+                    queue.Enqueue((child, level + 1, nextContext, childChain));
+                    child = walker.GetNextSiblingCached(child);
                 }
             }
             catch (ElementNotAvailableException) { complete = false; }
@@ -222,8 +270,22 @@ internal sealed partial class DesktopService : IDisposable
         {
             // Compare by native runtime identity, never by name or screen position.
             string Key(UiItem item) => references[item.Ref].RuntimeId;
-            var oldItems = previous.Items.ToDictionary(Key);
-            var newItems = items.ToDictionary(Key);
+            var oldItems = new Dictionary<string, UiItem>();
+            var newItems = new Dictionary<string, UiItem>();
+            var duplicateKeys = false;
+            foreach (var oldItem in previous.Items)
+            {
+                if (!references.ContainsKey(oldItem.Ref) || !oldItems.TryAdd(Key(oldItem), oldItem)) { duplicateKeys = true; break; }
+            }
+            if (!duplicateKeys)
+            {
+                foreach (var newItem in items)
+                {
+                    if (!newItems.TryAdd(Key(newItem), newItem)) { duplicateKeys = true; break; }
+                }
+            }
+            if (duplicateKeys)
+                return new { snapshot, window_id = window.Id, mode = "full", complete, items, visited, diff_reset = "Duplicate or expired control identities detected; replace the previous observation." };
             var oldOrder = previous.Items.Select(Key).Where(newItems.ContainsKey);
             var newOrder = items.Select(Key).Where(oldItems.ContainsKey);
             if (!oldOrder.SequenceEqual(newOrder))
@@ -239,38 +301,41 @@ internal sealed partial class DesktopService : IDisposable
                 references[old.Ref] = entry with { Expires = DateTime.UtcNow + RefLifetime };
                 var index = items.IndexOf(item);
                 items[index] = item with { Ref = old.Ref };
+                references.Remove(item.Ref);
             }
             return new { snapshot, window_id = window.Id, mode = "diff", base_snapshot = since, complete, items = changed, removed = previous.Items.Where(item => !newItems.ContainsKey(Key(item)) || changedKeys.Contains(Key(item))).Select(item => item.Ref).ToArray(), unchanged = unchanged.Count, visited };
         }
         return new { snapshot, window_id = window.Id, mode = "full", complete, items, visited, match_count = find ? matchesCount : (int?)null, needs_narrowing = find && (!complete || pick != "count" && items.Count != 1), diff_reset = since != null ? "Baseline missing, incomplete, expired, or scope changed; use this full result." : null };
     }
 
-    private static bool IsInteractive(AutomationElement element)
+    private static bool IsInteractive(ControlType type)
     {
-        var type = element.Current.ControlType;
         return type == ControlType.Button || type == ControlType.Edit || type == ControlType.CheckBox || type == ControlType.ComboBox || type == ControlType.ListItem || type == ControlType.MenuItem || type == ControlType.RadioButton || type == ControlType.TabItem || type == ControlType.TreeItem || type == ControlType.Hyperlink || type == ControlType.Slider || type == ControlType.Spinner || type == ControlType.DataItem || type == ControlType.ScrollBar;
     }
 
     private static UiItem ReadItem(string reference, AutomationElement element, string context, bool more, WindowEntry window, bool includeBounds)
+        => ReadItem(reference, element, element.BuildUpdatedCache().ReadCached(), context, more, window, includeBounds);
+
+    private static UiItem ReadItem(string reference, AutomationElement element, AutomationElement.CachedSnapshot snap, string context, bool more, WindowEntry window, bool includeBounds)
     {
-        var current = element.Current;
         string? value = null;
         bool? check = null, selected = null;
         string? expanded = null;
-        if (!current.IsPassword && element.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePattern)) value = Trim(((ValuePattern)valuePattern).Current.Value, 180);
+        if (!snap.IsPassword && element.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePattern)) value = Trim(((ValuePattern)valuePattern).Current.Value, 180);
         if (element.TryGetCurrentPattern(TogglePattern.Pattern, out var toggle)) check = ((TogglePattern)toggle).Current.ToggleState == ToggleState.On;
         if (element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out var selection)) selected = ((SelectionItemPattern)selection).Current.IsSelected;
         if (element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out var expand)) expanded = ((ExpandCollapsePattern)expand).Current.ExpandCollapseState.ToString().ToLowerInvariant();
         ItemBounds? bounds = null;
         if (includeBounds && Native.GetWindowRect(window.Handle, out var rect))
         {
-            var area = current.BoundingRectangle;
+            var area = snap.BoundingRectangle;
             if (!area.IsEmpty) bounds = new((int)area.X - rect.Left, (int)area.Y - rect.Top, (int)area.Width, (int)area.Height);
         }
-        return new(reference, Role(element), Trim(current.Name, 180), string.IsNullOrEmpty(context) ? null : context, value, current.IsEnabled ? null : false, current.IsOffscreen ? true : null, current.IsPassword ? true : null, check, selected, expanded, more ? true : null, bounds);
+        var role = snap.ControlType.ProgrammaticName.Replace("ControlType.", "").ToLowerInvariant();
+        return new(reference, role, Trim(snap.Name, 180), string.IsNullOrEmpty(context) ? null : context, value, snap.IsEnabled ? null : false, snap.IsOffscreen ? true : null, snap.IsPassword ? true : null, check, selected, expanded, more ? true : null, bounds);
     }
 
-    private object Act(JsonElement args)
+    internal object Act(JsonElement args)
     {
         var action = args.Text("action") ?? throw new DesktopError("INVALID_ARGUMENT", "action is required.");
         SelectCursorAgent(args);
@@ -279,7 +344,7 @@ internal sealed partial class DesktopService : IDisposable
         var expectation = args.TryGetProperty("expect", out var expect) ? ValidateExpectation(expect) : (Expectation?)null;
         ElementEntry? target = null;
         WindowEntry window;
-        if (action == "focus_window" || action is "click_point" or "mouse_move" or "mouse_wheel" or "drag_point") window = GetWindow(args.Text("window_id"));
+        if (action == "focus_window" || action is "click_point" or "mouse_move" or "mouse_wheel" or "drag_point" or "click_mark") window = GetWindow(args.Text("window_id"));
         else
         {
             target = Resolve(args.Text("ref"));
@@ -299,9 +364,18 @@ internal sealed partial class DesktopService : IDisposable
             _ = ReadExpectation(expectation, target, window);
         }
         var text = args.Text("text", 10000);
-        var key = args.Text("key", 30);
+        var key = args.Text("key", 50);
         if ((action == "set_value" || action == "type_text") && text == null) throw new DesktopError("INVALID_ARGUMENT", "text is required.");
         if (action == "press_key" && key == null) throw new DesktopError("INVALID_ARGUMENT", "key is required.");
+        if (target != null && target.Element.Current.IsEnabled && target.Element.Current.IsOffscreen && action != "scroll_into_view" && args.Flag("auto_scroll", true))
+        {
+            if (target.Element.TryGetCurrentPattern(ScrollItemPattern.Pattern, out var rawScrollItem))
+            {
+                ((ScrollItemPattern)rawScrollItem).ScrollIntoView();
+                ControlPresentation.Delay(80);
+                target = Resolve(target.Ref);
+            }
+        }
         if (target != null && (!target.Element.Current.IsEnabled || (target.Element.Current.IsOffscreen && action != "scroll_into_view"))) throw new DesktopError("NOT_ACTIONABLE", "Control is disabled or offscreen. Observe its current state.");
         if (target?.Element.Current.IsPassword == true) throw new DesktopError("PASSWORD_FIELD", "Password fields are excluded from this plugin.");
         Native.RequireInputPrivilege(window.Pid);
@@ -309,8 +383,7 @@ internal sealed partial class DesktopService : IDisposable
         if (target != null)
         {
             CursorOverlay.Highlight(target.Element.Current.BoundingRectangle, action is "focus" or "type_text" or "set_value" or "press_key", action is "click" or "double_click" or "triple_click", target.Element.Current.ControlType == ControlType.Button || target.Element.Current.ControlType == ControlType.Hyperlink || target.Element.Current.ControlType == ControlType.MenuItem);
-            CursorOverlay.WaitBeforeAction();
-            _ = Resolve(target.Ref); // Presentation delays cannot waive the normal identity guard.
+            if (CursorOverlay.WaitBeforeAction()) _ = Resolve(target.Ref); // Presentation delays cannot waive the normal identity guard.
         }
         var delivery = "sent";
         ControlPresentation.Check();
@@ -416,20 +489,75 @@ internal sealed partial class DesktopService : IDisposable
             case "mouse_move":
             case "mouse_wheel":
             case "drag_point": PointAction(args, window, action); break;
+            case "click_mark": ClickMark(args, window); break;
             default: throw new DesktopError("INVALID_ARGUMENT", "Unsupported action.");
         }
         if (action is "focus" or "type_text" or "set_value" or "press_key") CursorOverlay.Caret(Native.CaretRectangle(window.Handle));
-        if (expectation == null) return new { delivery, verification = "not_requested", retry = "observe_first", window_id = window.Id };
+        var observeAfter = args.Text("observe_after") ?? "none";
+        if (expectation == null)
+        {
+            var obs = ObserveAfterAction(args, window, observeAfter, out var obsErr);
+            return new { delivery, verification = "not_requested", retry = "observe_first", window_id = window.Id, observation = obs, observation_error = obsErr };
+        }
         var timer = Stopwatch.StartNew();
         object? actual = null;
         do
         {
             actual = ReadExpectation(expectation, target, window);
-            if (Equals(actual, expectation.Expected)) return new { delivery, verification = "passed", property = expectation.Property, actual = ShortActual(actual), window_id = window.Id };
+            if (Equals(actual, expectation.Expected))
+            {
+                var obs = ObserveAfterAction(args, window, observeAfter, out var obsErr);
+                return new { delivery, verification = "passed", property = expectation.Property, actual = ShortActual(actual), window_id = window.Id, observation = obs, observation_error = obsErr };
+            }
             if (timer.ElapsedMilliseconds >= timeout) break;
             ControlPresentation.Delay(70);
         } while (true);
-        return new { delivery, verification = "failed", property = expectation.Property, actual = ShortActual(actual), reason = "Postcondition was not observed before timeout. Do not repeat input without reading current state.", retry = "observe_first", window_id = window.Id };
+        var failedObs = ObserveAfterAction(args, window, observeAfter, out var failedObsErr);
+        return new { delivery, verification = "failed", property = expectation.Property, actual = ShortActual(actual), reason = "Postcondition was not observed before timeout. Do not repeat input without reading current state.", retry = "observe_first", window_id = window.Id, observation = failedObs, observation_error = failedObsErr };
+    }
+
+    private object? ObserveAfterAction(JsonElement args, WindowEntry window, string observeAfter, out string? errorCode)
+    {
+        errorCode = null;
+        if (observeAfter is not ("diff" or "snapshot")) return null;
+        var settle = args.Number("settle_ms", 120, 0, 1500);
+        if (settle > 0) ControlPresentation.Delay(settle);
+        try
+        {
+            string? baselineKey = null;
+            int depth = 3, limit = 30;
+            bool interactiveOnly = true, includeBounds = false;
+            if (observeAfter == "diff")
+            {
+                var match = observations
+                    .Where(pair =>
+                    {
+                        if (pair.Value.WindowId != window.Id || !pair.Value.Complete || !pair.Value.Scope.StartsWith("observe|window|", StringComparison.Ordinal)) return false;
+                        var p = pair.Value.Scope.Split('|');
+                        return p.Length == 9 && p[4] == "" && p[5] == "" && p[6] == "True";
+                    })
+                    .OrderByDescending(pair => pair.Value.Created)
+                    .FirstOrDefault();
+                if (match.Key != null)
+                {
+                    var parts = match.Value.Scope.Split('|');
+                    if (int.TryParse(parts[2], out var d) && int.TryParse(parts[3], out var l)
+                        && bool.TryParse(parts[7], out var io) && bool.TryParse(parts[8], out var ib))
+                    {
+                        baselineKey = match.Key; depth = d; limit = l; interactiveOnly = io; includeBounds = ib;
+                    }
+                }
+            }
+            var obsArgs = baselineKey != null
+                ? JsonSerializer.SerializeToElement(new { window_id = window.Id, depth, limit, interactive_only = interactiveOnly, include_bounds = includeBounds, since = baselineKey }, Program.Json)
+                : JsonSerializer.SerializeToElement(new { window_id = window.Id, depth, limit, interactive_only = interactiveOnly, include_bounds = includeBounds }, Program.Json);
+            return Observe(obsArgs, false);
+        }
+        catch (DesktopError err) when (err.Code is "WINDOW_NOT_FOUND" or "WINDOW_MINIMIZED" or "WINDOW_CHANGED")
+        {
+            errorCode = err.Code;
+            return null;
+        }
     }
 
     private static T RequirePattern<T>(ElementEntry entry, AutomationPattern pattern) where T : class
@@ -518,15 +646,28 @@ internal sealed partial class DesktopService : IDisposable
         var scale = Math.Min(1.0, (double)maxDimension / Math.Max(bitmap.Width, bitmap.Height));
         var imageWidth = Math.Max(1, (int)Math.Round(bitmap.Width * scale));
         var imageHeight = Math.Max(1, (int)Math.Round(bitmap.Height * scale));
-        using var resized = new Bitmap(bitmap, imageWidth, imageHeight);
+        var annotate = args.Flag("annotate");
+        var maxMarks = args.Number("max_marks", 40, 1, 60);
+        List<MarkEntry>? marksList = null;
+        object[]? publicMarks = null;
         using var stream = new MemoryStream();
-        resized.Save(stream, ImageFormat.Png);
+        if (imageWidth == bitmap.Width && imageHeight == bitmap.Height)
+        {
+            if (annotate) (marksList, publicMarks) = CollectAndAnnotateMarks(bitmap, window, visible, maxMarks);
+            bitmap.Save(stream, ImageFormat.Png);
+        }
+        else
+        {
+            using var resized = new Bitmap(bitmap, imageWidth, imageHeight);
+            if (annotate) (marksList, publicMarks) = CollectAndAnnotateMarks(resized, window, visible, maxMarks);
+            resized.Save(stream, ImageFormat.Png);
+        }
         if (!Native.GetWindowRect(window.Handle, out var after) || !SameRect(rect, after)) throw new DesktopError("WINDOW_CHANGED", "Window geometry changed during capture. Capture again.");
         var id = $"c-{epoch}-{++sequence}";
         var captureRect = new Native.Rect { Left = visible.Left, Top = visible.Top, Right = visible.Right, Bottom = visible.Bottom };
-        captures[id] = new(window, captureRect, imageWidth, imageHeight, DateTime.UtcNow);
+        captures[id] = new(window, captureRect, imageWidth, imageHeight, DateTime.UtcNow, Marks: marksList);
         windowGeometry[id] = rect;
-        return new { capture_id = id, window_id = window.Id, mode, width = imageWidth, height = imageHeight, source_region = new { x = visible.Left - rect.Left, y = visible.Top - rect.Top, width = visible.Width, height = visible.Height }, expires_in_ms = 10000, image = Convert.ToBase64String(stream.ToArray()), note = mode == "window" ? "Window pixels from Windows.Graphics.Capture, including when occluded. Physical input still requires foreground and an unobscured point." : "Visible screen pixels; overlays can appear. Point clicks use image coordinates, require foreground, and consume this capture." };
+        return new { capture_id = id, window_id = window.Id, mode, width = imageWidth, height = imageHeight, source_region = new { x = visible.Left - rect.Left, y = visible.Top - rect.Top, width = visible.Width, height = visible.Height }, expires_in_ms = 10000, marks = publicMarks, image = Convert.ToBase64String(stream.ToArray()), note = mode == "window" ? "Window pixels from Windows.Graphics.Capture, including when occluded. Physical input still requires foreground and an unobscured point." : "Visible screen pixels; overlays can appear. Point clicks use image coordinates, require foreground, and consume this capture." };
     }
 
     private Native.Point CapturePoint(JsonElement args, WindowEntry window)
@@ -573,5 +714,7 @@ internal sealed partial class DesktopService : IDisposable
         if (references.Count > 4000) { references.Clear(); observations.Clear(); }
         if (observations.Count > 16) observations.Remove(observations.Keys.First());
         if (captures.Count > 4) { var key = captures.Keys.First(); captures.Remove(key); windowGeometry.Remove(key); }
+        var tick = Environment.TickCount64;
+        foreach (var pid in processStartCache.Where(pair => tick - pair.Value.CheckedAt >= 5000).Select(pair => pair.Key).ToArray()) processStartCache.Remove(pid);
     }
 }

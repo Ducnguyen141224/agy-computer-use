@@ -28,9 +28,9 @@ internal static partial class Native
         var name = new StringBuilder((int)count);
         return GetCurrentPackageFullName(ref count, name) == 0 ? name.ToString() : null;
     }
-    [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
-    [DllImport("advapi32.dll")] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
     [DllImport("advapi32.dll")] private static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr info, uint size, out uint needed);
     [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
     [DllImport("advapi32.dll")] private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
@@ -51,18 +51,20 @@ internal static partial class Native
         }
         finally { if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer); if (token != IntPtr.Zero) CloseHandle(token); CloseHandle(process); }
     }
-    internal static int? Integrity(int pid)
+    internal static int? Integrity(int pid) => Integrity(pid, out _);
+    internal static int? Integrity(int pid, out int win32Error)
     {
+        win32Error = 0;
         var process = OpenProcess(0x1000, false, (uint)pid);
-        if (process == IntPtr.Zero) return null;
+        if (process == IntPtr.Zero) { win32Error = Marshal.GetLastWin32Error(); return null; }
         IntPtr token = IntPtr.Zero, buffer = IntPtr.Zero;
         try
         {
-            if (!OpenProcessToken(process, 8, out token)) return null;
+            if (!OpenProcessToken(process, 8, out token)) { win32Error = Marshal.GetLastWin32Error(); return null; }
             GetTokenInformation(token, 25, IntPtr.Zero, 0, out var size);
             if (size == 0 || size > 65536) return null;
             buffer = Marshal.AllocHGlobal((int)size);
-            if (!GetTokenInformation(token, 25, buffer, size, out _)) return null;
+            if (!GetTokenInformation(token, 25, buffer, size, out _)) { win32Error = Marshal.GetLastWin32Error(); return null; }
             var sid = Marshal.ReadIntPtr(buffer);
             var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
             return count == 0 ? null : Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)count - 1));
@@ -71,8 +73,10 @@ internal static partial class Native
     }
     internal static void RequireInputPrivilege(int pid)
     {
-        var current = Integrity(Environment.ProcessId);
-        var target = Integrity(pid);
+        var current = Integrity(Environment.ProcessId, out _);
+        var target = Integrity(pid, out var error);
+        if (current != null && target == null && error == 5)
+            throw new DesktopError("PERMISSION_DENIED", "The target process is elevated or protected (access denied). Input was not sent.", new { helper_integrity = current });
         if (current != null && target > current) throw new DesktopError("PERMISSION_DENIED", "The target has a higher Windows integrity level. Input was not sent.", new { helper_integrity = current, target_integrity = target });
     }
 }

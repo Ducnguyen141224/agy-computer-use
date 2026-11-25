@@ -26,6 +26,12 @@ internal static class WindowCapture
     [DllImport("combase.dll")] private static extern int RoGetActivationFactory(IntPtr name, in Guid iid, out IntPtr result);
     [DllImport("d3d11.dll")] private static extern int CreateDirect3D11DeviceFromDXGIDevice(IntPtr device, out IntPtr result);
     [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Native.Rect rect, int size);
+    [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+    private static readonly object deviceGate = new();
+    private static ID3D11Device? sharedDevice;
+    private static ID3D11DeviceContext? sharedContext;
+    private static IDirect3DDevice? sharedWinDevice;
 
     public static bool Supported => GraphicsCaptureSession.IsSupported();
     internal static Native.Rect Bounds(IntPtr window)
@@ -33,6 +39,46 @@ internal static class WindowCapture
         if (DwmGetWindowAttribute(window, 9, out var rect, Marshal.SizeOf<Native.Rect>()) != 0) Native.GetWindowRect(window, out rect);
         return rect;
     }
+
+    internal static void DisposeShared()
+    {
+        lock (deviceGate)
+        {
+            (sharedWinDevice as IDisposable)?.Dispose(); sharedWinDevice = null;
+            sharedContext?.Dispose(); sharedContext = null;
+            sharedDevice?.Dispose(); sharedDevice = null;
+        }
+    }
+
+    private static (ID3D11Device Device, ID3D11DeviceContext Context, IDirect3DDevice WinDevice) EnsureSharedDevice()
+    {
+        if (sharedDevice != null && sharedContext != null && sharedWinDevice != null)
+        {
+            if (sharedDevice.DeviceRemovedReason.Success) return (sharedDevice, sharedContext, sharedWinDevice);
+            DisposeShared();
+        }
+        var result = D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, [FeatureLevel.Level_11_0], out ID3D11Device device, out ID3D11DeviceContext context);
+        if (result.Failure) result = D3D11.D3D11CreateDevice(null, DriverType.Warp, DeviceCreationFlags.BgraSupport, [FeatureLevel.Level_11_0], out device, out context);
+        result.CheckError();
+        try
+        {
+            using var dxgi = device.QueryInterface<IDXGIDevice>();
+            Marshal.ThrowExceptionForHR(CreateDirect3D11DeviceFromDXGIDevice(dxgi.NativePointer, out var pointer));
+            var winDevice = WinRT.MarshalInterface<IDirect3DDevice>.FromAbi(pointer);
+            Marshal.Release(pointer);
+            sharedDevice = device;
+            sharedContext = context;
+            sharedWinDevice = winDevice;
+            return (device, context, winDevice);
+        }
+        catch
+        {
+            context.Dispose();
+            device.Dispose();
+            throw;
+        }
+    }
+
     private static GraphicsCaptureItem Item(IntPtr window)
     {
         const string name = "Windows.Graphics.Capture.GraphicsCaptureItem";
@@ -58,44 +104,74 @@ internal static class WindowCapture
             WindowsDeleteString(hstring);
         }
     }
-    public static Bitmap Capture(IntPtr window, int timeoutMs = 2200)
+
+    internal static Bitmap CapturePrintWindow(IntPtr window)
     {
-        if (!Supported) throw new DesktopError("CAPTURE_UNSUPPORTED", "Windows.Graphics.Capture is not supported by this desktop.");
-        var result = D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, [FeatureLevel.Level_11_0], out ID3D11Device device, out ID3D11DeviceContext context);
-        if (result.Failure) result = D3D11.D3D11CreateDevice(null, DriverType.Warp, DeviceCreationFlags.BgraSupport, [FeatureLevel.Level_11_0], out device, out context);
-        result.CheckError();
-        using (device)
-        using (context)
-        using (var dxgi = device.QueryInterface<IDXGIDevice>())
+        var rect = Bounds(window);
+        if (rect.Width <= 0 || rect.Height <= 0) throw new DesktopError("CAPTURE_UNAVAILABLE", "Window has no capture area.");
+        if ((long)rect.Width * rect.Height > 16000000) throw new DesktopError("CAPTURE_TOO_LARGE", "Window exceeds the capture pixel budget.");
+        var bitmap = new Bitmap(rect.Width, rect.Height, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bitmap))
         {
-            Marshal.ThrowExceptionForHR(CreateDirect3D11DeviceFromDXGIDevice(dxgi.NativePointer, out var pointer));
-            var winDevice = WinRT.MarshalInterface<IDirect3DDevice>.FromAbi(pointer);
-            Marshal.Release(pointer);
+            var hdc = g.GetHdc();
             try
             {
-                var item = Item(window);
-                if ((long)item.Size.Width * item.Size.Height > 16000000) throw new DesktopError("CAPTURE_TOO_LARGE", "Window exceeds the capture pixel budget.");
-                using var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(winDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, item.Size);
-                using var session = pool.CreateCaptureSession(item);
-                session.IsCursorCaptureEnabled = false;
-                session.StartCapture();
-                var timer = Stopwatch.StartNew();
-                var empty = false;
-                do
+                if (!PrintWindow(window, hdc, 2) && !PrintWindow(window, hdc, 0))
                 {
-                    using var frame = pool.TryGetNextFrame();
-                    if (frame != null)
-                    {
-                        try { return ReadFrame(frame, device, context); }
-                        catch (DesktopError error) when (error.Code == "CAPTURE_EMPTY") { empty = true; }
-                    }
-                    Thread.Sleep(10);
-                } while (timer.ElapsedMilliseconds < timeoutMs);
-                throw new DesktopError(empty ? "CAPTURE_EMPTY" : "CAPTURE_TIMEOUT", empty ? "Windows returned only transparent window frames. No point-input token was created." : "No capture frame arrived before timeout. No screen fallback was used.");
+                    bitmap.Dispose();
+                    throw new DesktopError("CAPTURE_UNAVAILABLE", "PrintWindow fallback failed.");
+                }
             }
-            finally { (winDevice as IDisposable)?.Dispose(); }
+            finally { g.ReleaseHdc(hdc); }
+        }
+        return bitmap;
+    }
+
+    public static Bitmap Capture(IntPtr window, int timeoutMs = 2200)
+    {
+        if (!Supported) return CapturePrintWindow(window);
+        lock (deviceGate)
+        {
+            try { return CaptureWithDevice(window, timeoutMs); }
+            catch (SharpGen.Runtime.SharpGenException)
+            {
+                DisposeShared();
+                return CaptureWithDevice(window, timeoutMs);
+            }
         }
     }
+
+    private static Bitmap CaptureWithDevice(IntPtr window, int timeoutMs)
+    {
+        var (device, context, winDevice) = EnsureSharedDevice();
+        var item = Item(window);
+        if (item.Size.Width <= 0 || item.Size.Height <= 0) throw new DesktopError("CAPTURE_UNAVAILABLE", "Window capture reported empty dimensions.");
+        if ((long)item.Size.Width * item.Size.Height > 16000000) throw new DesktopError("CAPTURE_TOO_LARGE", "Window exceeds the capture pixel budget.");
+        using var arrived = new ManualResetEventSlim(false);
+        using var pool = Direct3D11CaptureFramePool.CreateFreeThreaded(winDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 1, item.Size);
+        pool.FrameArrived += (_, _) => arrived.Set();
+        using var session = pool.CreateCaptureSession(item);
+        session.IsCursorCaptureEnabled = false;
+        session.StartCapture();
+        var timer = Stopwatch.StartNew();
+        var empty = false;
+        while (true)
+        {
+            ControlPresentation.Check();
+            using var frame = pool.TryGetNextFrame();
+            if (frame != null)
+            {
+                try { return ReadFrame(frame, device, context); }
+                catch (DesktopError error) when (error.Code == "CAPTURE_EMPTY") { empty = true; }
+            }
+            var remaining = timeoutMs - (int)timer.ElapsedMilliseconds;
+            if (remaining <= 0) break;
+            arrived.Reset();
+            arrived.Wait(Math.Min(remaining, 35));
+        }
+        throw new DesktopError(empty ? "CAPTURE_EMPTY" : "CAPTURE_TIMEOUT", empty ? "Windows returned only transparent window frames. No point-input token was created." : "No capture frame arrived before timeout. No screen fallback was used.");
+    }
+
     private static Bitmap ReadFrame(Direct3D11CaptureFrame frame, ID3D11Device device, ID3D11DeviceContext context)
     {
         var surface = WinRT.MarshalInterface<IDirect3DSurface>.FromManaged(frame.Surface);
@@ -125,6 +201,7 @@ internal static class WindowCapture
             {
                 var width = Math.Min(frame.ContentSize.Width, (int)description.Width);
                 var height = Math.Min(frame.ContentSize.Height, (int)description.Height);
+                if (width <= 0 || height <= 0) throw new DesktopError("CAPTURE_EMPTY", "Window frame had empty dimensions.");
                 var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
                 var opaque = false;
                 var bits = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);

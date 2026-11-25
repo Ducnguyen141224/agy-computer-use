@@ -12,7 +12,26 @@ namespace AgyComputerUse;
 internal sealed class AutomationElement
 {
     [ThreadStatic] private static UIA.IUIAutomation? client;
+    [ThreadStatic] private static UIA.IUIAutomationCacheRequest? cacheRequest;
     internal static UIA.IUIAutomation Client => client ??= new UIA.CUIAutomation8();
+    internal static UIA.IUIAutomationCacheRequest ElementCacheRequest => cacheRequest ??= CreateCacheRequest();
+    private static UIA.IUIAutomationCacheRequest CreateCacheRequest()
+    {
+        var req = Client.CreateCacheRequest();
+        req.TreeScope = UIA.TreeScope.TreeScope_Element;
+        req.AutomationElementMode = UIA.AutomationElementMode.AutomationElementMode_Full;
+        req.AddProperty(System.Windows.Automation.AutomationElement.RuntimeIdProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.NameProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.ControlTypeProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.AutomationIdProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.ProcessIdProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.IsEnabledProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.IsOffscreenProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.IsPasswordProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.NativeWindowHandleProperty.Id);
+        req.AddProperty(System.Windows.Automation.AutomationElement.BoundingRectangleProperty.Id);
+        return req;
+    }
     // UIA2's identifier registry is lazy. LookupById alone can return null until a
     // managed provider happens to initialize the corresponding control constant.
     private static readonly Dictionary<int, ControlType> ControlTypes = typeof(ControlType)
@@ -33,8 +52,30 @@ internal sealed class AutomationElement
     internal static AutomationElement RootElement => Call(() => new AutomationElement(Client.GetRootElement()));
     internal static AutomationElement? FocusedElement => Call(() => Wrap(Client.GetFocusedElement()));
     internal static AutomationElement FromHandle(IntPtr window) => Call(() => new AutomationElement(Client.ElementFromHandle(window)));
+    internal static AutomationElement FromHandleBuildCache(IntPtr window) => Call(() => new AutomationElement(Client.ElementFromHandleBuildCache(window, ElementCacheRequest)));
     internal static AutomationElement FromPoint(Point point) => Call(() => new AutomationElement(Client.ElementFromPoint(new UIA.tagPOINT { x = (int)point.X, y = (int)point.Y })));
     internal Information Current => new(NativeElement);
+    internal AutomationElement BuildUpdatedCache() => Call(() => new AutomationElement(NativeElement.BuildUpdatedCache(ElementCacheRequest)));
+    internal readonly record struct CachedSnapshot(string RuntimeId, int ControlTypeId, ControlType ControlType, string Name, string AutomationId, int ProcessId, long NativeWindowHandle, bool IsEnabled, bool IsOffscreen, bool IsPassword, Rect BoundingRectangle);
+    internal CachedSnapshot ReadCached() => Call(() =>
+    {
+        var typeId = NativeElement.CachedControlType;
+        var bounds = NativeElement.CachedBoundingRectangle;
+        var ridObj = NativeElement.GetCachedPropertyValue(System.Windows.Automation.AutomationElement.RuntimeIdProperty.Id);
+        var rid = ridObj is int[] arr && arr.Length > 0 ? string.Join(".", arr) : string.Join(".", NativeElement.GetRuntimeId().Cast<int>());
+        return new CachedSnapshot(
+            rid,
+            typeId,
+            ControlTypes.GetValueOrDefault(typeId, ControlType.Custom),
+            NativeElement.CachedName ?? "",
+            NativeElement.CachedAutomationId ?? "",
+            NativeElement.CachedProcessId,
+            NativeElement.CachedNativeWindowHandle.ToInt64(),
+            NativeElement.CachedIsEnabled != 0,
+            NativeElement.CachedIsOffscreen != 0,
+            NativeElement.CachedIsPassword != 0,
+            new Rect(bounds.left, bounds.top, Math.Max(0, bounds.right - bounds.left), Math.Max(0, bounds.bottom - bounds.top)));
+    });
     internal int[] GetRuntimeId() => Call(() => NativeElement.GetRuntimeId().Cast<int>().ToArray());
     internal void SetFocus() => Call(NativeElement.SetFocus);
     internal static AutomationProperty AutomationIdProperty => System.Windows.Automation.AutomationElement.AutomationIdProperty;
@@ -92,7 +133,7 @@ internal sealed class AutomationElement
         internal string ClassName => Call(() => element.CurrentClassName ?? "");
         internal string HelpText => Call(() => element.CurrentHelpText ?? "");
         internal int ProcessId => Call(() => element.CurrentProcessId);
-        internal int NativeWindowHandle => Call(() => unchecked((int)element.CurrentNativeWindowHandle.ToInt64()));
+        internal long NativeWindowHandle => Call(() => element.CurrentNativeWindowHandle.ToInt64());
         internal ControlType ControlType => Call(() => ControlTypes.GetValueOrDefault(element.CurrentControlType, ControlType.Custom));
         internal bool IsEnabled => Call(() => element.CurrentIsEnabled != 0);
         internal bool IsOffscreen => Call(() => element.CurrentIsOffscreen != 0);
@@ -115,6 +156,8 @@ internal sealed class TreeWalker
     internal AutomationElement? GetParent(AutomationElement element) => AutomationElement.Call(() => AutomationElement.Wrap(AutomationElement.Client.ControlViewWalker.GetParentElement(element.NativeElement)));
     internal AutomationElement? GetFirstChild(AutomationElement element) => AutomationElement.Call(() => AutomationElement.Wrap(AutomationElement.Client.ControlViewWalker.GetFirstChildElement(element.NativeElement)));
     internal AutomationElement? GetNextSibling(AutomationElement element) => AutomationElement.Call(() => AutomationElement.Wrap(AutomationElement.Client.ControlViewWalker.GetNextSiblingElement(element.NativeElement)));
+    internal AutomationElement? GetFirstChildCached(AutomationElement element) => AutomationElement.Call(() => AutomationElement.Wrap(AutomationElement.Client.ControlViewWalker.GetFirstChildElementBuildCache(element.NativeElement, AutomationElement.ElementCacheRequest)));
+    internal AutomationElement? GetNextSiblingCached(AutomationElement element) => AutomationElement.Call(() => AutomationElement.Wrap(AutomationElement.Client.ControlViewWalker.GetNextSiblingElementBuildCache(element.NativeElement, AutomationElement.ElementCacheRequest)));
 }
 
 internal sealed class InvokePattern(UIA.IUIAutomationInvokePattern pattern)

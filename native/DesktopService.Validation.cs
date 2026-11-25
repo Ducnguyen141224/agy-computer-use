@@ -9,7 +9,12 @@ internal sealed partial class DesktopService
     {
         SchemaValidation.Command(method, args);
         if (args.ValueKind != JsonValueKind.Object) throw new DesktopError("INVALID_ARGUMENT", "Command arguments must be an object.");
-        if (method == "capture" && (args.TryGetProperty("window_id", out _) == args.TryGetProperty("display_id", out _) || args.TryGetProperty("display_id", out _) && args.TryGetProperty("mode", out _))) throw new DesktopError("INVALID_ARGUMENT", "Capture needs exactly one window_id or display_id; display capture does not take mode.");
+        if (method == "capture")
+        {
+            if (args.TryGetProperty("window_id", out _) == args.TryGetProperty("display_id", out _) || args.TryGetProperty("display_id", out _) && args.TryGetProperty("mode", out _)) throw new DesktopError("INVALID_ARGUMENT", "Capture needs exactly one window_id or display_id; display capture does not take mode.");
+            if (args.Flag("annotate") && args.TryGetProperty("display_id", out _)) throw new DesktopError("INVALID_ARGUMENT", "Annotated Set-of-Marks capture requires window_id.");
+            _ = args.Number("max_marks", 40, 1, 60);
+        }
         void Require(params string[] fields) { foreach (var field in fields) if (!args.TryGetProperty(field, out _)) throw new DesktopError("INVALID_ARGUMENT", $"{field} is required for this operation."); }
         if (method == "windows") { _ = args.Number("limit", 30, 1, 60); _ = args.Text("query"); }
         if (method == "read")
@@ -21,12 +26,16 @@ internal sealed partial class DesktopService
         if (method == "act")
         {
             var action = args.Text("action") ?? "";
-            if (!new[] { "click", "right_click", "double_click", "triple_click", "hover", "drag", "set_value", "clear", "check", "uncheck", "toggle", "select", "expand", "collapse", "scroll", "scroll_into_view", "focus", "focus_window", "type_text", "press_key", "click_point", "mouse_move", "mouse_wheel", "drag_point" }.Contains(action)) throw new DesktopError("INVALID_ARGUMENT", "Unsupported action.");
+            if (!new[] { "click", "right_click", "double_click", "triple_click", "hover", "drag", "set_value", "clear", "check", "uncheck", "toggle", "select", "expand", "collapse", "scroll", "scroll_into_view", "focus", "focus_window", "type_text", "press_key", "click_point", "mouse_move", "mouse_wheel", "drag_point", "click_mark" }.Contains(action)) throw new DesktopError("INVALID_ARGUMENT", "Unsupported action.");
             var point = new[] { "click_point", "mouse_move", "mouse_wheel", "drag_point" }.Contains(action);
             _ = Native.ValidatePointerModifiers(args);
-            if (args.TryGetProperty("modifiers", out _) && action is not ("click" or "right_click" or "double_click" or "triple_click" or "click_point" or "mouse_wheel" or "drag" or "drag_point")) throw new DesktopError("INVALID_ARGUMENT", "Modifiers apply to click, wheel or drag gestures.");
-            Require(point || action == "focus_window" ? "window_id" : "ref");
+            if (args.TryGetProperty("modifiers", out _) && action is not ("click" or "right_click" or "double_click" or "triple_click" or "click_point" or "mouse_wheel" or "drag" or "drag_point" or "click_mark")) throw new DesktopError("INVALID_ARGUMENT", "Modifiers apply to click, wheel or drag gestures.");
+            Require(point || action is "focus_window" or "click_mark" ? "window_id" : "ref");
             if (point) { Require("capture_id", "x", "y"); _ = args.Number("x", 0, 0, 1599); _ = args.Number("y", 0, 0, 1599); }
+            if (action == "click_mark") { Require("capture_id", "mark"); _ = args.Number("mark", 1, 1, 60); }
+            else if (args.TryGetProperty("mark", out _)) throw new DesktopError("INVALID_ARGUMENT", "mark applies to click_mark only.");
+            if (args.Text("observe_after") is string observeAfter && observeAfter is not ("none" or "diff" or "snapshot")) throw new DesktopError("INVALID_ARGUMENT", "Unsupported observe_after mode.");
+            _ = args.Number("settle_ms", 120, 0, 1500);
             if (action is "drag" or "drag_point")
             {
                 if (args.TryGetProperty("to_ref", out _))

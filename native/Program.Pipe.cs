@@ -54,18 +54,32 @@ internal static partial class Program
             {
                 var line = reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
                 if (line == null) continue;
-                using var request = JsonDocument.Parse(line);
-                if (request.RootElement.TryGetProperty("method", out var method) && method.GetString() == "shutdown")
+                if (line.Length > 131072)
                 {
-                    writer.WriteLine(JsonSerializer.Serialize(new { id = request.RootElement.GetProperty("id"), ok = true, data = new { stopped = true } }, Json));
+                    writer.WriteLine(JsonSerializer.Serialize(new { ok = false, error = new { code = "INVALID_ARGUMENT", message = "Request exceeds maximum line size." } }, Json));
+                    continue;
+                }
+                using var request = JsonDocument.Parse(line);
+                if (request.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    writer.WriteLine(JsonSerializer.Serialize(new { ok = false, error = new { code = "INVALID_ARGUMENT", message = "Request must be a JSON object." } }, Json));
+                    continue;
+                }
+                if (request.RootElement.TryGetProperty("method", out var method) && method.ValueKind == JsonValueKind.String && method.GetString() == "shutdown")
+                {
+                    object? reqId = request.RootElement.TryGetProperty("id", out var idProp) ? idProp.Clone() : null;
+                    writer.WriteLine(JsonSerializer.Serialize(new { id = reqId, ok = true, data = new { stopped = true } }, Json));
                     return;
                 }
-                using var watchdog = new System.Threading.Timer(_ => Environment.Exit(124), null, TimeSpan.FromSeconds(13), Timeout.InfiniteTimeSpan);
+                using var watchdog = new System.Threading.Timer(_ => { try { Native.ReleaseOwnedInput(); } catch { } Environment.Exit(124); }, null, TimeSpan.FromSeconds(13), Timeout.InfiniteTimeSpan);
                 writer.WriteLine(HandleLine(line, desktop));
             }
             catch (IOException) { }
             catch (TimeoutException) { }
-            catch (JsonException) { }
+            catch (JsonException)
+            {
+                try { writer.WriteLine(JsonSerializer.Serialize(new { ok = false, error = new { code = "INVALID_ARGUMENT", message = "Invalid JSON request." } }, Json)); } catch { }
+            }
         }
     }
 }

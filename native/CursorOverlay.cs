@@ -78,7 +78,11 @@ internal static class CursorOverlay
     }
     internal static void Highlight(System.Windows.Rect rect, bool caret, bool pulse, bool pressable = false)
     {
-        if (!rect.IsEmpty && rect.Width > 0 && rect.Height > 0) ControlPresentation.Pointer((int)(rect.X + rect.Width / 2), (int)(rect.Y + rect.Height / 2), pulse);
+        if (!rect.IsEmpty && rect.Width > 0 && rect.Height > 0)
+        {
+            ControlPresentation.Pointer((int)(rect.X + rect.Width / 2), (int)(rect.Y + rect.Height / 2), pulse);
+            if (!enabled) ControlPresentation.FlashHighlight(Rectangle.FromLTRB((int)rect.Left, (int)rect.Top, (int)rect.Right, (int)rect.Bottom));
+        }
         if (!enabled || rect.IsEmpty || rect.Width <= 0 || rect.Height <= 0) return;
         StaDispatcher.Run(() =>
         {
@@ -95,11 +99,13 @@ internal static class CursorOverlay
             return true;
         });
     }
-    internal static void WaitBeforeAction()
+    internal static bool WaitBeforeAction()
     {
-        if (!enabled) return;
+        if (!enabled) return false;
         var pause = StaDispatcher.Run(() => form?.Markers.TryGetValue(active, out var marker) == true && marker.Config.Enabled && marker.Config.PauseMs > 0 ? Math.Max(0, marker.Duration - (int)(Environment.TickCount64 - marker.Moved)) + marker.Config.PauseMs : 0);
-        if (pause > 0) ControlPresentation.Delay(pause);
+        if (pause <= 0) return false;
+        ControlPresentation.Delay(pause);
+        return true;
     }
     internal static void Caret(System.Windows.Rect? rect)
     {
@@ -120,6 +126,7 @@ internal static class CursorOverlay
         internal OverlayForm()
         {
             Text = "AGY cursor presentation"; ShowInTaskbar = false; FormBorderStyle = FormBorderStyle.None;
+            AutoScaleMode = AutoScaleMode.None;
             StartPosition = FormStartPosition.Manual; Bounds = SystemInformation.VirtualScreen;
             BackColor = Color.Magenta; TransparencyKey = Color.Magenta; TopMost = true; DoubleBuffered = true;
             clock.Tick += (_, _) =>
@@ -150,7 +157,7 @@ internal static class CursorOverlay
         }
         protected override void OnPaint(PaintEventArgs args)
         {
-            base.OnPaint(args); var g = args.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
+            base.OnPaint(args); var g = args.Graphics; g.SmoothingMode = SmoothingMode.None;
             g.TranslateTransform(-Left, -Top); var now = Environment.TickCount64;
             lastPaint = now;
             foreach (var marker in Markers.Values.Where(item => item.Config.Enabled))

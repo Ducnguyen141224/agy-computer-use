@@ -136,7 +136,8 @@ internal sealed class PointerPresenter : Form
         }
         internal void Wake() => active.Set();
         internal void Rest() => active.Reset();
-        public void Dispose() { if (closed) return; closed = true; stop.Set(); thread.Join(500); timer.Dispose(); active.Dispose(); stop.Dispose(); }
+        public void Dispose() { if (disposingGuard()) return; stop.Set(); if (thread.Join(500)) { timer.Dispose(); active.Dispose(); stop.Dispose(); } }
+        private bool disposingGuard() { if (closed) return true; closed = true; return false; }
         [DllImport("kernel32.dll", EntryPoint = "CreateWaitableTimerExW", CharSet = CharSet.Unicode)] private static extern IntPtr CreateWaitableTimerEx(IntPtr security, string? name, uint flags, uint access);
         [DllImport("kernel32.dll")] private static extern bool SetWaitableTimer(SafeWaitHandle timer, ref long due, int period, IntPtr callback, IntPtr argument, bool resume);
     }

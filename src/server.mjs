@@ -29,7 +29,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   }
 });
 
-const shutdown = async () => { controller.close(); await server.close(); };
+const shutdown = async () => { await controller.close(); await server.close(); };
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 process.stdin.once('end', () => controller.close());

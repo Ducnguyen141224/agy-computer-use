@@ -70,7 +70,7 @@ Luồng cơ bản: windows → observe/find → act kèm expect → đọc phầ
 
 ## Workflow và ngữ cảnh trong RAM
 
-Đọc `desktop_help {"topic":"runtime"}` khi cần workflow; các chủ đề khác gồm core/reading/context/capture/notifications/browser/clipboard/cursor/recovery/permissions. MCP resource `agy://guides/runtime` trả cùng nội dung. Skill chỉ giữ hướng dẫn khởi đầu ngắn; bản plugin có các file references theo chủ đề. Catalog 13 tool và thứ tự schema được cố định suốt phiên, không thay đổi khi nạp hướng dẫn hay đổi session. Điều này tạo điều kiện cho cache của host; không tự chứng minh cache hit.
+Đọc `desktop_help {"topic":"runtime"}` khi cần workflow; các chủ đề khác gồm core/reading/context/capture/notifications/browser/clipboard/cursor/recovery/permissions. MCP resource `agy://guides/runtime` trả cùng nội dung. Skill chỉ giữ hướng dẫn khởi đầu ngắn; bản plugin có các file references theo chủ đề. Catalog 20 tool (13 desktop + 7 browser) và thứ tự schema được cố định suốt phiên, không thay đổi khi nạp hướng dẫn hay đổi session. Điều này tạo điều kiện cho cache của host; không tự chứng minh cache hit.
 
 `desktop_run` nhận `code`, `max_steps` (mặc định 20, tối đa 80) và `timeout_ms` (mặc định 12 giây, tối đa 30 giây). Script là JavaScript đồng bộ thông thường; native I/O được QuickJS Asyncify tạm dừng/chạy tiếp. Không dùng async/await, Promise trả về, import, timers hoặc Node API. Chỉ có `desktop.windows/observe/find/read/act/query/system/capture`, `desktop.one`, `desktop.emit` và object `state` giữ biến giữa những lần chạy thành công trong cùng session.
 
@@ -250,3 +250,42 @@ MCP tự mở phiên hiển thị khi bắt đầu dùng desktop: viền xanh gi
 complete chỉ xác nhận ranh giới cuộn do UIA provider công bố. Nội dung tải từ xa/ảo hóa, trang lặp giống nhau hoặc UIA thiếu vẫn cần kiểm tra mốc đầu/cuối và fallback DOM/ảnh có mục tiêu. Đọc lên trả các trang theo thứ tự đi ngược, dòng bên trong trang theo thứ tự xuôi. Reader hết hạn sau hai phút; end/reset/switch xóa nội dung RAM. MCP không thể ép model của Antigravity tiếp tục khi host/provider đã kết thúc lượt.
 
 Chạy `npm run test:reading` để kiểm tra trên cửa sổ WPF thử nghiệm. AGY_NATIVE_EXECUTABLE cho phép chọn helper build thử; AGY_DESKTOP_TEST_SCOPE (GUID N) cô lập mutex/stop event trong test. Không đặt các biến này trong cấu hình plugin sử dụng hằng ngày.
+
+## Browser theo tab riêng (v0.7.0)
+
+Cùng plugin có thêm bảy nhóm tool MCP: browser_session, browser_tabs, browser_read, browser_act, browser_wait, browser_capture và browser_dialog. Chrome/Edge phải được cài sẵn. Phần browser dùng playwright-core 1.65.1 với browser channel đã cài, pipe và profile tạm; không attach trình duyệt/profile cá nhân, không mở cổng debug. Native desktop CLI/FFI và desktop_run không chạy API browser.
+
+Luồng chuẩn:
+
+```js
+browser_session({operation:'start', browser:'chrome'});
+const tab = browser_tabs({operation:'new', url:'https://example.com'});
+browser_read({operation:'snapshot', tab_id:tab.tab_id});
+// Chọn ref hoặc một locator khớp duy nhất, rồi browser_act và browser_wait.
+// Gọi browser_session({operation:'end'}) trong finally khi hoàn tất.
+```
+
+Đoạn trên minh họa các lần gọi MCP, không phải API JavaScript được đưa vào desktop_run. Mỗi thao tác tab đã có đều bắt buộc tab_id. Điều khiển DOM/chuột/phím của Playwright gắn vào page, không dùng SendInput toàn màn hình, không có fallback tab hiện tại. Cùng phiên MCP này chặn các tool desktop khi browser scope còn mở, trừ status/control/help/context; không chặn chương trình, phiên MCP hay plugin khác. Agent không được dùng tool desktop khác để vượt scope. Tab popup bị cách ly cho đến khi gọi adopt rõ ràng.
+
+browser_read trả chữ DOM và refs có kiểm tra identity; ref hết hạn sau 60 giây hoặc navigation/thay element. Password được loại khỏi DOM read/input. Iframe dùng frame_id riêng, có hỗ trợ cross-origin và open shadow DOM. Danh sách frame tối đa 80; snapshot tối đa 100 control, duyệt tối đa 300 control; các cờ complete báo giới hạn. Nội dung canvas/closed shadow DOM hoặc DOM thiếu cần ảnh trong đúng tab. Snapshot một frame không chứng minh đã đọc toàn bộ trang hay lịch sử tải từ xa.
+
+browser_act hỗ trợ click, double_click, hover, fill, type, press, check/uncheck, select_option theo nhãn, scroll page/element, drag cùng tab, click_point và mouse_move. Các target trùng bị từ chối. Capture là một PNG viewport trong RAM, không có tùy chọn path; token 10 giây, dùng một lần, ràng buộc tab, navigation, scroll và bộ đếm thay đổi DOM chính. Bộ đếm không phát hiện đầy đủ canvas repaint hoặc thay đổi trong iframe/shadow root. Ảnh giữ cách che ký tự password thông thường của trình duyệt; không phải bộ lọc mọi dữ liệu nhạy cảm. Luôn quan sát mới và xác minh sau input.
+
+Dialog JS cần inspect/accept/dismiss rõ ràng; không tự accept. Timeout/cancel không lặp input. Delivery không rõ buộc đọc/capture mới rồi reconcile với recovery_note. Cancel đang chạy đóng đúng tab đó để ngăn input giao muộn. ESC/control_stop đóng browser riêng và giữ stop latch; mất helper ESC cũng dừng browser và giữ scope khóa; không hoàn tác tác động đã gửi. Profile tạm và dữ liệu đăng nhập không được giữ sau khi đóng; cần đăng nhập thủ công trong browser riêng nếu trang yêu cầu. Không hỗ trợ upload/download file, tự nhập password, gắn profile đang đăng nhập hay arbitrary JavaScript/evaluate qua MCP.
+
+Không ghi screenshot, video, trace, HAR hay báo cáo test ra đĩa. Trình duyệt vẫn tạo cache/profile tạm như dữ liệu vận hành thông thường; Playwright dọn profile của nó khi đóng bình thường. Đây là cơ chế định tuyến tab cho agent, không phải sandbox an ninh cho mọi hành vi JavaScript của website. Việc model Antigravity tự chọn đúng tool và tiếp tục lượt thuộc host; một lần gọi tool thành công không chứng minh agent host tự vận hành đúng.
+
+Các kiểm tra có thể chạy lại (chỉ dùng trang HTTP và cửa sổ thử nghiệm riêng):
+
+```powershell
+npm test
+npm run test:browser
+npm run test:browser:visible
+npm run test:browser:edge
+node scripts/browser-smoke.mjs --edge --visible
+npm run test:browser:lifecycle
+node scripts/browser-lifecycle-smoke.mjs --edge
+node scripts/browser-escape-smoke.mjs
+```
+
+Các bài browser kiểm tra form HTTP nhận dữ liệu từ đúng tab, tab còn lại không đổi, iframe khác origin, shadow DOM, drag/drop, popup/dialog, pixel PNG, stale refs/capture, navigation, cancel/timeout/disconnect/stop và dọn profile. Kết quả từng lần chạy chỉ in ra stdout; không lưu bằng chứng. Tài liệu API thư viện: [BrowserType.launch](https://playwright.dev/docs/api/class-browsertype#browser-type-launch), [Page.screenshot](https://playwright.dev/docs/api/class-page#page-screenshot).

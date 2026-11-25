@@ -10,7 +10,7 @@ const write = (path, text) => { mkdirSync(dirname(path), { recursive: true }); w
 write(join(target, 'plugin.json'), JSON.stringify({
   $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
   name: 'agy-computer-use', version: metadata.version,
-  description: 'Windows UIA3 computer use with compact MCP observations, guarded refs and RAM-only captures.'
+  description: 'Windows UIA3 desktop and isolated Chrome/Edge tabs, guarded refs and RAM-only captures.'
 }, null, 2) + '\n');
 write(join(target, 'mcp.json'), JSON.stringify({ $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json', mcpServers: {
   'agy-computer-use': { type: 'stdio', command: 'node', args: [join(root, 'src', 'server.mjs')] }

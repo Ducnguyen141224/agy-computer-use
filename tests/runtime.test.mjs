@@ -66,7 +66,7 @@ test('controller queue prevents ordinary calls from interleaving a workflow', as
 });
 
 test('catalog is immutable and complete for both old and new MCP clients', () => {
-  assert.equal(tools.length, 13);
+  assert.equal(tools.length, 20);
   assert.ok(Object.isFrozen(tools)); assert.ok(Object.isFrozen(tools[0].inputSchema.properties));
   assert.throws(() => tools.reverse());
 });

@@ -8,7 +8,13 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const node = (label, script, ...args) => ({ label, command: process.execPath, args: [script, ...args] });
 const suites = [
   { label: 'unit and transport', command: process.execPath, args: ['--test', ...readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.mjs')).map(name => join('tests', name))] },
-  ...['desktop', 'advanced', 'provider', 'capture', 'drag', 'launch', 'presentation', 'control', 'reading', 'lifecycle', 'workflow', 'shell', 'cli'].map(name => node(name, `scripts/${name}-smoke.mjs`)),
+  ...['desktop', 'advanced', 'provider', 'capture', 'drag', 'launch', 'presentation', 'control', 'reading', 'browser', 'lifecycle', 'workflow', 'shell', 'cli'].map(name => node(name, `scripts/${name}-smoke.mjs`)),
+  node('browser visible', 'scripts/browser-smoke.mjs', '--visible'),
+  node('Edge tabs', 'scripts/browser-smoke.mjs', '--edge'),
+  node('Edge tabs visible', 'scripts/browser-smoke.mjs', '--edge', '--visible'),
+  node('browser lifecycle', 'scripts/browser-lifecycle-smoke.mjs'),
+  node('Edge lifecycle', 'scripts/browser-lifecycle-smoke.mjs', '--edge'),
+  node('browser Escape', 'scripts/browser-escape-smoke.mjs'),
   { label: 'C ABI', command: 'dotnet', args: ['run', '--project', 'tests/ffi/FfiSmoke.csproj', '-c', 'Release', '--', '.'] },
   { label: 'notification parser', command: 'dotnet', args: ['run', '--project', 'tests/notifications/NotificationSmoke.csproj', '-c', 'Release', '--', '.'] },
   { label: 'real shell notifications', command: 'dotnet', args: ['run', '--project', 'tests/notifications/NotificationSmoke.csproj', '-c', 'Release', '--', '.', '--shell'] },

@@ -2,21 +2,29 @@ import { tools, validateCall } from './tools.mjs';
 import { guides } from './guides.mjs';
 import { TaskContext } from './task-context.mjs';
 import { WorkflowRuntime } from './workflow-runtime.mjs';
+import { BrowserController } from './browser-controller.mjs';
 
 const readOperations = new Set(['status','permissions','version','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status','control_status','control_stop','control_resume','control_start','control_end']);
 const mutates = (method, args) => args.open === true || method === 'act' || method === 'batch' || method === 'read' && args.operation === 'collect' || method === 'system' && !readOperations.has(args.operation);
 const failure = (code, message, details) => ({ ok: false, error: { code, message, details } });
 export class DesktopController {
-  constructor(bridge) { this.bridge = bridge; this.tail = Promise.resolve(); this.session = 'default'; this.contexts = new Map([['default', new TaskContext()]]); this.runtimes = new Map(); this.generation = 0; this.closed = false; this.stopRun = null; bridge.on?.('controlStop', () => { this.stopRun?.(); for (const runtime of this.runtimes.values()) runtime.close(); this.runtimes.clear(); this.context.invalidate(); }); }
+  constructor(bridge) { this.bridge = bridge; this.browser = new BrowserController(bridge); this.tail = Promise.resolve(); this.session = 'default'; this.contexts = new Map([['default', new TaskContext()]]); this.runtimes = new Map(); this.generation = 0; this.closed = false; this.stopRun = null; bridge.on?.('controlStop', () => { this.stopRun?.(); void this.browser.stop().catch(()=>{}); for (const runtime of this.runtimes.values()) runtime.close(); this.runtimes.clear(); this.context.invalidate(); }); bridge.on?.('helperReset', error => { if(!this.closed && this.browser.scoped && this.browser.active) void this.browser.stop(error.code==='USER_STOPPED'?'USER_STOPPED':'NATIVE_CONTROL_LOST').catch(()=>{}); }); }
   get context() { if (!this.contexts.has(this.session)) this.contexts.set(this.session, new TaskContext()); return this.contexts.get(this.session); }
   request(name, args, { signal } = {}) {
+    // The browser can be waiting without using native I/O: allow explicit stop to interrupt it.
+    if (name === 'desktop_system' && args.operation === 'control_stop' && this.browser.scoped && !this.closed) {
+      try { validateCall(tools.find(tool=>tool.name===name),args); return this.#native('system',args,signal).catch(error=>failure(error.code??'NATIVE_ERROR',error.message,error.details)); }
+      catch(error) { return Promise.resolve(failure('INVALID_ARGUMENT',error.message)); }
+    }
     const work = this.tail.then(async () => {
       if (this.closed || signal?.aborted) return failure('CANCELLED', 'Request stopped before execution.');
       try {
         const tool = tools.find(item => item.name === name); if (!tool) return failure('UNKNOWN_TOOL', 'Unknown desktop tool.');
         validateCall(tool, args);
+        if (name.startsWith('browser_')) return await this.browser.request(name,args,{signal});
         if (name === 'desktop_help') return { ok: true, data: { topic: args.topic, instructions: guides[args.topic] } };
         if (name === 'desktop_context') return { ok: true, data: this.context.command(args, this.session) };
+        if (this.browser.scoped && !(name==='desktop_system' && ['status','permissions','version','control_status','control_stop','control_resume','control_end'].includes(args.operation))) return failure('BROWSER_SCOPE_ACTIVE','This task is scoped to owned browser tabs. Desktop reads/input and desktop_run are blocked. End browser_session explicitly before a desktop task.');
         if ((['desktop_windows','desktop_observe','desktop_find','desktop_capture','desktop_query','desktop_read','desktop_run','desktop_act','desktop_batch'].includes(name) || name === 'desktop_system' && mutates('system', args)) && !this.bridge.userStopped) {
           const scope = await this.#native('system', { operation: 'control_start' }, signal);
           const recoveryRead = ['desktop_windows','desktop_observe','desktop_find','desktop_capture','desktop_query'].includes(name) || name === 'desktop_read' && args.operation === 'snapshot';
@@ -125,5 +133,5 @@ export class DesktopController {
       }
     }
   }
-  close() { this.closed = true; for (const runtime of this.runtimes.values()) runtime.close(); this.runtimes.clear(); this.bridge.close(); }
+  close() { this.closed = true; for (const runtime of this.runtimes.values()) runtime.close(); this.runtimes.clear(); const cleanup=this.browser.close(); this.bridge.close(); return cleanup; }
 }

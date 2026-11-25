@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { tools } from '../src/tools.mjs';
 
-const schemas = Object.fromEntries(tools.filter(tool => !['desktop_run','desktop_context','desktop_help'].includes(tool.name)).map(tool => [tool.name.slice(8), tool.inputSchema]));
+const schemas = Object.fromEntries(tools.filter(tool => tool.name.startsWith('desktop_') && !['desktop_run','desktop_context','desktop_help'].includes(tool.name)).map(tool => [tool.name.slice(8), tool.inputSchema]));
 schemas.batch = {
   type: 'object', additionalProperties: false, required: ['commands'], properties: {
     commands: { type: 'array', minItems: 1, maxItems: 15, items: { type: 'object', additionalProperties: false, required: ['method', 'params'], properties: { method: { type: 'string', enum: ['windows', 'observe', 'find', 'act', 'query', 'system', 'capture', 'read'] }, params: { type: 'object', additionalProperties: true } } } },

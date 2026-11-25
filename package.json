@@ -1,12 +1,12 @@
 {
   "name": "agy-computer-use",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "bin": {
     "agy-desktop": "src/cli.mjs"
   },
-  "description": "Memory-only Windows computer use MCP server for Antigravity",
+  "description": "Windows desktop and isolated Chrome/Edge computer use MCP for Antigravity",
   "engines": {
     "node": ">=22"
   },
@@ -17,6 +17,11 @@
     "start": "node src/server.mjs",
     "test": "node --test tests/*.test.mjs",
     "test:regression": "node scripts/regression.mjs",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:browser:escape": "node scripts/browser-escape-smoke.mjs",
+    "test:browser:lifecycle": "node scripts/browser-lifecycle-smoke.mjs",
+    "test:browser:visible": "node scripts/browser-smoke.mjs --visible",
+    "test:browser:edge": "node scripts/browser-smoke.mjs --edge",
     "test:reading": "node scripts/reading-smoke.mjs",
     "test:workflow": "node scripts/workflow-smoke.mjs",
     "test:desktop": "node scripts/desktop-smoke.mjs",
@@ -39,6 +44,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
+    "playwright-core": "1.65.1",
     "quickjs-emscripten": "0.32.0"
   }
 }

@@ -29,7 +29,9 @@ const transport = new StdioClientTransport({ env: desktopTestEnv(), command: ser
 try {
   await client.connect(transport);
   const inventory = await client.listTools();
-  assert.deepEqual(inventory.tools.map(tool => tool.name).sort(), ['act', 'batch', 'capture', 'find', 'observe', 'query', 'session', 'system', 'windows','read','run','context','help'].map(name => `desktop_${name}`).sort());
+  assert.deepEqual(inventory.tools.map(tool => tool.name).sort(), [...['act','batch','capture','find','observe','query','session','system','windows','read','run','context','help'].map(name=>`desktop_${name}`), ...['session','tabs','read','act','wait','capture','dialog'].map(name=>`browser_${name}`)].sort());
+  const browserInfo = await client.callTool({name:'browser_session',arguments:{operation:'info'}});
+  assert.equal(browserInfo.isError,false);assert.equal(JSON.parse(browserInfo.content[0].text).active,false);
   const reply = await client.callTool({ name: 'desktop_system', arguments: { operation: 'status' } });
   assert.equal(reply.isError, false);
   assert.equal(JSON.parse(reply.content[0].text).accessibility, 'UIA3 (CUIAutomation8)');
@@ -40,5 +42,5 @@ try {
   const runtime = await client.callTool({ name: 'desktop_run', arguments: { code: 'state.installed=true; return {installed:state.installed, platform:desktop.system({operation:"status"}).platform};' } });
   assert.equal(runtime.isError, false, runtime.content[0].text); assert.equal(JSON.parse(runtime.content[0].text).result.platform, 'windows');
   assert.equal((await client.listResources()).resources.length, 11);
-  process.stdout.write('PASS installed plugin manifest/skill, all thirteen tools, eleven lazy guides, real UIA3 and isolated workflow runtime connect successfully. No evidence files saved.\n');
+  process.stdout.write('PASS installed plugin manifest/skill, all twenty tools, eleven lazy guides, real UIA3 and isolated workflow runtime connect successfully. No evidence files saved.\n');
 } finally { await client.close(); }

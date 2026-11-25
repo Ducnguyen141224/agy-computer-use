@@ -24,7 +24,7 @@ async function call(name, args = {}, expectError = false) {
 try {
   await client.connect(transport);
   const listed = await client.listTools();
-  check(listed.tools.length === 13 && ['desktop_windows','desktop_observe','desktop_find','desktop_act','desktop_system','desktop_query','desktop_batch','desktop_session','desktop_capture','desktop_run','desktop_context','desktop_help','desktop_read'].every(name => listed.tools.some(tool => tool.name === name)), 'MCP preserves the nine native tool groups and adds runtime, task context and on-demand help');
+  check(listed.tools.length === 20 && ['desktop_windows','desktop_observe','desktop_find','desktop_act','desktop_system','desktop_query','desktop_batch','desktop_session','desktop_capture','desktop_run','desktop_context','desktop_help','desktop_read'].every(name => listed.tools.some(tool => tool.name === name)), 'MCP preserves the nine native tool groups and adds runtime, task context and on-demand help');
   let window;
   for (let attempt = 0; attempt < 30; attempt++) {
     const { data } = await call('desktop_windows', { query: title });

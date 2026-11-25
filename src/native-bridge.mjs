@@ -125,6 +125,7 @@ export class NativeBridge extends EventEmitter {
     if (child) {
       child.stdin.destroy();
       child.kill();
+      this.emit('helperReset', error);
     }
   }
 

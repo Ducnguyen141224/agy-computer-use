@@ -66,7 +66,7 @@ internal sealed partial class DesktopService : IDisposable
         {
             try
             {
-                if (handle == CursorOverlay.WindowHandle || handle == ControlPresentation.WindowHandle || !Native.IsWindowVisible(handle) || Native.IsCloaked(handle)) return true;
+                if (handle == CursorOverlay.WindowHandle || ControlPresentation.OwnsWindow(handle) || !Native.IsWindowVisible(handle) || Native.IsCloaked(handle)) return true;
                 var titleBuffer = new StringBuilder(1024);
                 Native.GetWindowText(handle, titleBuffer, titleBuffer.Capacity);
                 var title = titleBuffer.ToString();

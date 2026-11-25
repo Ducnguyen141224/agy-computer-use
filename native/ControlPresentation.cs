@@ -13,16 +13,23 @@ internal static class ControlPresentation
     private static readonly HookCallback Callback = Keyboard;
     private static IntPtr hook;
     private static ActivityForm? form;
+    private static PointerPresenter? pointer;
+    private static readonly object pointGate = new();
+    private static Point latestPoint;
+    private static bool latestPulse;
+    private static int pointQueued;
     private static int owners;
     private static long until;
     private static volatile bool visible;
     internal static IntPtr WindowHandle;
+    internal static IntPtr PointerWindowHandle;
+    internal static bool OwnsWindow(IntPtr window) => window != IntPtr.Zero && (window == WindowHandle || window == PointerWindowHandle);
     internal static bool Paused => Stopped.WaitOne(0);
     internal static bool Active => !Paused && (Volatile.Read(ref owners) > 0 || Environment.TickCount64 < Interlocked.Read(ref until));
     internal static IDisposable Begin()
     {
         Check();
-        StaDispatcher.Run(() =>
+        PresentationDispatcher.Run(() =>
         {
             Check();
             if (hook == IntPtr.Zero)
@@ -31,10 +38,12 @@ internal static class ControlPresentation
                 if (hook == IntPtr.Zero) throw new DesktopError("STOP_HOOK_UNAVAILABLE", "Cannot register Escape stop. No new action was started.");
             }
             form ??= new ActivityForm();
+            pointer ??= new PointerPresenter();
             Interlocked.Increment(ref owners);
             Interlocked.Exchange(ref until, Environment.TickCount64 + 1800);
             CursorOverlay.Suspend(false);
-            form.Wake(); visible = true; WindowHandle = form.Handle;
+            try { form.Wake(); pointer.Wake(); visible = true; WindowHandle = form.Handle; PointerWindowHandle = pointer.Handle; }
+            catch { Interlocked.Decrement(ref owners); form.Rest(); pointer.Rest(); throw; }
             return true;
         });
         return new Activity();
@@ -49,25 +58,38 @@ internal static class ControlPresentation
         if (Paused) throw new DesktopError("USER_STOPPED", "Control was stopped with Escape. Inspect the UI; resume only after a new explicit user instruction.", new { delivery = "unknown", resume = "desktop_system control_resume" });
     }
     internal static void Delay(int milliseconds) { if (Stopped.WaitOne(Math.Max(0, milliseconds))) Check(); }
-    internal static object Status() => new { paused = Paused, active = Active, rendered = visible && WindowHandle != IntPtr.Zero, border = "#3B82F6", escape_to_stop = true, idle_hide_ms = 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction" };
+    internal static object Status() => new { paused = Paused, active = Active, rendered = visible && WindowHandle != IntPtr.Zero, border = "#3B82F6", escape_to_stop = true, idle_hide_ms = 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
     internal static object Resume() { Stopped.Reset(); return Status(); }
     internal static void Stop()
     {
         var first = !Paused;
         Stopped.Set();
-        StaDispatcher.Run(() => { form?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
+        PresentationDispatcher.Run(() => { form?.Rest(); pointer?.Rest(); visible = false; CursorOverlay.Suspend(true); return true; });
         // The bridge may terminate a blocked helper: release our own input before notifying it.
         ThreadPool.QueueUserWorkItem(_ => { Native.ReleaseOwnedInput(); if (first) Program.ControlStopped(); });
     }
     internal static void Pointer(int x, int y, bool pulse = false)
     {
         if (!Active) return;
-        StaDispatcher.Run(() => { form?.MovePointer(new(x, y), pulse); return true; });
+        lock (pointGate) { latestPoint = new(x, y); latestPulse |= pulse; }
+        if (Interlocked.Exchange(ref pointQueued, 1) != 0) return;
+        PresentationDispatcher.Post(() =>
+        {
+            Point point; bool clicked;
+            lock (pointGate) { point = latestPoint; clicked = latestPulse; latestPulse = false; Interlocked.Exchange(ref pointQueued, 0); }
+            if (Active) pointer?.MovePointer(point, clicked);
+        });
+    }
+    internal static void ProfilesChanged()
+    {
+        if (form == null) return;
+        PresentationDispatcher.Post(() => { if (CursorOverlay.HasEnabledProfile) pointer?.Rest(); else if (Active) pointer?.Wake(); });
     }
     internal static void Close()
     {
         if (form == null && hook == IntPtr.Zero) return;
-        StaDispatcher.Run(() => { form?.Close(); form = null; visible = false; WindowHandle = IntPtr.Zero; if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } return true; });
+        PresentationDispatcher.Run(() => { pointer?.Close(); pointer = null; PointerWindowHandle = IntPtr.Zero; form?.Close(); form = null; visible = false; WindowHandle = IntPtr.Zero; if (hook != IntPtr.Zero) { UnhookWindowsHookEx(hook); hook = IntPtr.Zero; } return true; });
+        PresentationDispatcher.Shutdown();
     }
     private static IntPtr Keyboard(int code, IntPtr message, IntPtr data)
     {
@@ -91,36 +113,30 @@ internal static class ControlPresentation
 
     private sealed class ActivityForm : Form
     {
-        private readonly System.Windows.Forms.Timer clock = new() { Interval = 16 };
-        private PointF from, target;
-        private long moved, pulse;
+        private readonly System.Windows.Forms.Timer clock = new() { Interval = 100 };
+        internal long Paints;
         internal ActivityForm()
         {
             Text = "AGY control indicator"; ShowInTaskbar = false; FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual; Bounds = SystemInformation.VirtualScreen;
             BackColor = Color.Magenta; TransparencyKey = Color.Magenta; TopMost = true; DoubleBuffered = true;
-            Native.GetPhysicalCursorPos(out var position); from = target = new(position.X, position.Y);
             clock.Tick += (_, _) =>
             {
-                if (!Active) { Rest(); visible = false; if (Paused) CursorOverlay.Suspend(true); return; }
+                if (!Active) { Rest(); pointer?.Rest(); visible = false; if (Paused) CursorOverlay.Suspend(true); return; }
                 if (Bounds != SystemInformation.VirtualScreen) Bounds = SystemInformation.VirtualScreen;
                 if (!Visible) { Show(); visible = true; }
-                var now = Environment.TickCount64;
-                if (now - moved < 160 || pulse > 0 && now - pulse < 550) Invalidate();
             };
             clock.Start();
         }
-        internal void Wake() { clock.Start(); if (!Visible) Show(); Invalidate(); }
+        internal void Wake() { clock.Start(); if (!Visible) { Show(); Invalidate(); } }
         internal void Rest() { clock.Stop(); if (Visible) Hide(); }
         protected override bool ShowWithoutActivation => true;
         protected override CreateParams CreateParams { get { var p = base.CreateParams; p.ExStyle |= 0x080800A0; return p; } }
         protected override void WndProc(ref Message m) { if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; } if (m.Msg == 0x21) { m.Result = new IntPtr(3); return; } base.WndProc(ref m); }
-        private PointF Position(long now) { var t = Math.Clamp((now - moved) / 110f, 0, 1); t = t * t * (3 - 2 * t); return new(from.X + (target.X - from.X) * t, from.Y + (target.Y - from.Y) * t); }
-        internal void MovePointer(Point point, bool clicked) { var now = Environment.TickCount64; from = Position(now); target = point; moved = now; if (clicked) pulse = now; Invalidate(); }
         protected override void OnPaint(PaintEventArgs args)
         {
-            base.OnPaint(args);
-            var g = args.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.TranslateTransform(-Left, -Top);
+            base.OnPaint(args); Paints++;
+            var g = args.Graphics; g.SmoothingMode = SmoothingMode.None; g.TranslateTransform(-Left, -Top);
             foreach (var screen in Screen.AllScreens)
             {
                 var b = screen.Bounds;
@@ -135,15 +151,6 @@ internal static class ControlPresentation
             using var font = new Font("Segoe UI", 10f, FontStyle.Bold); using var label = new SolidBrush(Color.FromArgb(239, 246, 255));
             using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
             g.DrawString("AGY đang điều khiển  ·  ESC để dừng", font, label, pill, format);
-            if (!CursorOverlay.HasEnabledProfile)
-            {
-                var now = Environment.TickCount64; var p = Position(now);
-                using var blue = new Pen(Color.FromArgb(59, 130, 246), 2.5f); using var white = new SolidBrush(Color.White); using var halo = new SolidBrush(Color.FromArgb(191, 219, 254));
-                g.FillEllipse(halo, p.X - 12, p.Y - 12, 30, 30);
-                PointF[] arrow = [p, new(p.X + 5, p.Y + 25), new(p.X + 11, p.Y + 15), new(p.X + 24, p.Y + 11)];
-                g.FillPolygon(white, arrow); g.DrawPolygon(blue, arrow);
-                if (pulse > 0 && now - pulse < 500) { var radius = 16 + (now - pulse) / 14f; g.DrawEllipse(blue, p.X - radius, p.Y - radius, radius * 2, radius * 2); }
-            }
         }
         protected override void Dispose(bool disposing) { if (disposing) clock.Dispose(); base.Dispose(disposing); }
     }

@@ -36,7 +36,11 @@ Gói có manifest, skill, mcp.json cho Agent Plugins và mcp_config.json tương
 
 ## Hiệu ứng điều khiển và phím ESC
 
-Từ v0.5.0, plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ có quầng sáng, chuyển động mượt, vòng nhấn chuột. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên khi có. Overlay xuyên click và không lấy focus; viền tự ẩn sau 1,8 giây không còn thao tác, và giữ hiện suốt workflow.
+Từ v0.5.0, plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ đen viền trắng cùng vòng hiệu ứng nhấn chuột. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên khi có. Overlay xuyên click và không lấy focus; viền tự ẩn sau 1,8 giây không còn thao tác, và giữ hiện suốt workflow.
+
+Từ v0.5.1, con trỏ mặc định là mũi tên **đen viền trắng**, bỏ quầng xanh thường trực. Viền màn hình được giữ tĩnh; con trỏ dùng surface alpha 112×112 pixel trên luồng render riêng, không dùng chung luồng clipboard/shell. Đồng hồ độ phân giải cao nhắm tối đa 120 nhịp gửi frame/giây khi có animation, ngừng khi đứng yên. Chuyển hướng nội suy theo vận tốc đang chạy; lệnh trùng điểm đến không khởi động lại chuyển động. Đây là tối ưu của plugin, không phải cam kết FPS hay bản sao từng pixel của Codex.
+
+`desktop_system {"operation":"control_status"}` trả thêm số frame đã gửi, median/p95 khoảng cách gửi frame, số lần vẽ viền và kích thước surface. Đây là số đo submission trong RAM, không phải FPS đo trên màn hình và không tạo tệp bằng chứng.
 
 Ấn **ESC** trong khi đang điều khiển để ẩn hiệu ứng và dừng input/workflow, kể cả lúc script đang chạy vòng lặp hoặc native đang chờ/kéo chuột. Plugin nhả phím/nút chuột do nó giữ; thao tác đã gửi trước thời điểm dừng không thể hoàn tác. ESC do chính agent gửi cho ứng dụng không kích hoạt nút dừng. Khi không điều khiển, ESC vẫn hoạt động bình thường trong ứng dụng.
 

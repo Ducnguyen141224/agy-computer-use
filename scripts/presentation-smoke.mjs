@@ -17,7 +17,12 @@ try {
   await client.connect(transport);
   const call = async (name, args) => {
     const reply = await client.callTool({ name, arguments: args });
-    const data = JSON.parse(reply.content[0].text); assert.equal(reply.isError, false, JSON.stringify(data));
+    const data = JSON.parse(reply.content[0].text);
+    if (reply.isError && data.error?.code==='FOCUS_DENIED') {
+      const diagnostic=JSON.parse((await client.callTool({name:'desktop_system',arguments:{operation:'status',diagnostic:true}})).content[0].text);
+      process.stdout.write(`Focus diagnostic: ${JSON.stringify({foreground:diagnostic.diagnostic?.foreground_app,foreground_class:diagnostic.diagnostic?.foreground_class,helper_pid:diagnostic.process_id,fixture_pid:fixture.pid})}\n`);
+    }
+    assert.equal(reply.isError, false, JSON.stringify(data));
     return { ...data, image: reply.content.find(item => item.type === 'image')?.data };
   };
   const waitFrame = async (window_id, region, expected) => {

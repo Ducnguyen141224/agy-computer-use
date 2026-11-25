@@ -57,7 +57,8 @@ internal static class ControlProbe
                         finally { graphics.ReleaseHdc(target); ReleaseDC(IntPtr.Zero, desktop); }
                         var color = bitmap.GetPixel(0, 0); return new[] { (int)color.R, color.G, color.B };
                     }).ToArray();
-                    data = new { rendered = window != IntPtr.Zero && IsWindowVisible(window), click_through = (styles & 0x20) != 0, no_activate = (styles & 0x08000000) != 0, foreground, borders = samples };
+                    var pointer = FindWindow(null, "AGY animated pointer");
+                    data = new { rendered = window != IntPtr.Zero && IsWindowVisible(window), pointer_visible = pointer != IntPtr.Zero && IsWindowVisible(pointer), click_through = (styles & 0x20) != 0, no_activate = (styles & 0x08000000) != 0, foreground, borders = samples };
                 }
                 else throw new InvalidOperationException("Unknown probe command.");
                 Console.WriteLine(JsonSerializer.Serialize(data));

@@ -10,7 +10,7 @@ namespace AgyComputerUse;
 // Presentation only: this window never receives focus or authorizes input.
 internal static class CursorOverlay
 {
-    internal sealed record Profile(bool Enabled = false, string Style = "arrow", string Accent = "#2563EB", string Fill = "#FFFFFF", string Rim = "#172554", int Size = 26, string Label = "", int MaxWords = 6, bool Labels = true, int TravelMs = 120, int DwellMs = 1500, int HotspotX = 0, int HotspotY = 0, byte[]? Png = null, bool Ripple = true, bool Highlight = true, bool Caret = true,
+    internal sealed record Profile(bool Enabled = false, string Style = "arrow", string Accent = "#2563EB", string Fill = "#111111", string Rim = "#FFFFFF", int Size = 26, string Label = "", int MaxWords = 6, bool Labels = true, int TravelMs = 120, int DwellMs = 1500, int HotspotX = 0, int HotspotY = 0, byte[]? Png = null, bool Ripple = true, bool Highlight = true, bool Caret = true,
         int? TravelMinMs = null, int? TravelMaxMs = null, double Bow = 0, double Overshoot = 0, double Tremor = 0, int MotionSeed = 0, int PauseMs = 0, byte[]? PointerPng = null, int PointerHotspotX = 0, int PointerHotspotY = 0);
     private sealed class Marker(Profile profile)
     {
@@ -50,9 +50,9 @@ internal static class CursorOverlay
     }
     private static OverlayForm? form;
     private static volatile bool enabled;
-    private static bool suspended;
+    private static volatile bool suspended;
     internal static bool HasEnabledProfile => enabled;
-    internal static void Suspend(bool value) { suspended = value; if (form != null) { if (value) form.Hide(); else if (enabled) form.Show(); } }
+    internal static void Suspend(bool value) { suspended = value; if (form != null) StaDispatcher.Post(() => { if (form != null) { if (suspended) form.Hide(); else if (enabled) form.Show(); } }); }
     private static string active = "default";
     internal static IntPtr WindowHandle;
     internal static object RenderState() => !enabled ? new { rendered = false, caret = (object?)null } : StaDispatcher.Run<object>(() => new { rendered = form?.Visible == true && WindowHandle != IntPtr.Zero, caret = form?.Markers.TryGetValue(active, out var marker) == true && marker.Caret is Rectangle r ? (object)new { x = r.X, y = r.Y, width = r.Width, height = r.Height } : null });
@@ -61,6 +61,7 @@ internal static class CursorOverlay
     {
         active = selected;
         enabled = profiles.Values.Any(item => item.Enabled);
+        ControlPresentation.ProfilesChanged();
         if (!enabled) { form?.Close(); form = null; WindowHandle = IntPtr.Zero; return true; }
         form ??= new OverlayForm();
         form.UpdateProfiles(profiles);

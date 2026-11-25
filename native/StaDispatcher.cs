@@ -43,6 +43,12 @@ internal sealed class StaDispatcher : IDisposable
         }
     }
     internal static void Shutdown() { if (Shared.IsValueCreated) Shared.Value.Dispose(); }
+    internal static void Post(Action callback)
+    {
+        if (!Shared.IsValueCreated) return;
+        var dispatcher = Shared.Value;
+        if (dispatcher.control is { IsDisposed: false }) dispatcher.control.BeginInvoke(callback);
+    }
     public void Dispose()
     {
         if (control == null || control.IsDisposed) return;

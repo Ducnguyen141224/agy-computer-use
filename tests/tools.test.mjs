@@ -74,3 +74,15 @@ test('batch images are mapped once and launch/gesture conflicts fail before disp
   assert.throws(() => validateCall(act, { action: 'click', ref: '@r', modifiers: ['ctrl', 'ctrl'] }));
   assert.throws(() => validateCall(act, { action: 'drag', ref: '@r', to_ref: '@other', to_x: 2 }));
 });
+
+test('desktop click_mark, auto_scroll, observe_after, and annotate capture contracts validate strictly', () => {
+  const act = tools.find(tool => tool.name === 'desktop_act');
+  const capture = tools.find(tool => tool.name === 'desktop_capture');
+  validateCall(act, { action: 'click_mark', window_id: 'w', capture_id: 'c1', mark: 3, modifiers: ['ctrl'], observe_after: 'diff', settle_ms: 100 });
+  validateCall(act, { action: 'click', ref: '@r', auto_scroll: true, observe_after: 'snapshot' });
+  assert.throws(() => validateCall(act, { action: 'click_mark', window_id: 'w', capture_id: 'c1' }));
+  assert.throws(() => validateCall(act, { action: 'click_mark', window_id: 'w', capture_id: 'c1', mark: 1, ref: '@r' }));
+  assert.throws(() => validateCall(act, { action: 'click', ref: '@r', mark: 1 }));
+  validateCall(capture, { window_id: 'w', annotate: true, max_marks: 25 });
+  assert.throws(() => validateCall(capture, { display_id: '\\\\.\\DISPLAY1', annotate: true }));
+});

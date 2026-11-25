@@ -17,3 +17,5 @@ tests/cdp/obj/
 plugin/
 antigravity.mcp.json
 NVIDIA Corporation/
+tests/codex/bin/
+tests/codex/obj/

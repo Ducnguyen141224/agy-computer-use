@@ -1,6 +1,6 @@
 {
   "name": "agy-computer-use",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -40,7 +40,9 @@
     "test:shell": "node scripts/shell-smoke.mjs",
     "test:ffi": "dotnet run --project tests/ffi/FfiSmoke.csproj -c Release -- .",
     "test:setup": "node scripts/setup-smoke.mjs",
-    "test:plugin": "node scripts/plugin-smoke.mjs"
+    "test:plugin": "node scripts/plugin-smoke.mjs",
+    "test:codex": "dotnet build tests/fixture/DesktopFixture.csproj -c Release --nologo && dotnet run --project tests/codex/CodexSmoke.csproj -c Release -- .",
+    "test:browser:codex": "node scripts/codex-browser-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

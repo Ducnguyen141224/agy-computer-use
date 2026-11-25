@@ -78,3 +78,75 @@ test('cleanup uncertainty cannot be returned as a successful preserved runtime',
   try { const reply = await controller.request('desktop_run', { code: 'state.test=1; return true;' }); assert.equal(reply.data.verification, 'failed'); assert.equal(reply.data.state_preserved, false); assert.equal(reply.data.error.code, 'LEASE_RELEASE_UNKNOWN'); assert.ok(invalidated); }
   finally { controller.close(); }
 });
+
+test('TaskContext compact trims notes and retains at most three verified conditions', () => {
+  const context = new TaskContext();
+  context.command({ operation: 'update', goal: 'g'.repeat(900), constraints: Array.from({ length: 10 }, (_, i) => `${i}:` + 'c'.repeat(220)), next_step: 'n'.repeat(600) }, 'default');
+  for (let i = 0; i < 6; i++) context.record('act', { action: 'click', ref: `@r${i}` }, { ok: true, data: { verification: 'passed' } });
+  const compacted = context.command({ operation: 'compact' }, 'default');
+  assert.equal(compacted.goal.length, 400);
+  assert.equal(compacted.next_step.length, 300);
+  assert.equal(compacted.constraints.length, 8);
+  assert.ok(compacted.constraints.every(item => item.length <= 160));
+  assert.equal(compacted.verified_conditions.length, 3);
+  assert.equal(compacted.verified_conditions[0].ref, '@r3');
+});
+
+test('WorkflowRuntime blocks code breakout and survives guest JSON tampering', async () => {
+  const runtime = new WorkflowRuntime();
+  try {
+    const options = { timeout_ms: 2500, dispatch: () => { throw new Error('No desktop API expected'); } };
+    const breakout = await runtime.run('})(); return "escaped"; (() => {', options);
+    assert.equal(breakout.ok, false);
+    const tampered = await runtime.run('globalThis.JSON.stringify = () => "hacked"; return { ok: true };', options);
+    assert.equal(tampered.ok, true);
+    assert.deepEqual(tampered.value, { ok: true });
+    const after = await runtime.run('return { preserved: 42 };', options);
+    assert.equal(after.ok, true);
+    assert.deepEqual(after.value, { preserved: 42 });
+  } finally { runtime.close(); }
+});
+
+test('desktop_run timeout during first in-flight mutation records uncertainty in recovery', async () => {
+  const bridge = {
+    generation: 1, child: {}, userStopped: false,
+    async request(method, args) {
+      if (method === 'system' && args.operation === 'control_start') return { ok: true, data: { active: true } };
+      if (method === 'session') return { ok: true, data: { session_id: 'default' } };
+      if (method === 'lease') return { ok: true, data: { token: 't', released: true } };
+      if (method === 'act') { await new Promise(resolve => setTimeout(resolve, 600)); return { ok: true, data: { delivery: 'sent' } }; }
+      return { ok: true, data: {} };
+    },
+    close() {}, invalidate() {}
+  };
+  const controller = new DesktopController(bridge);
+  try {
+    const reply = await controller.request('desktop_run', { code: 'desktop.act({action:"click",ref:"@a"}); return 1;', timeout_ms: 150 });
+    assert.equal(reply.data.execution_status, 'failed');
+    assert.ok(reply.data.recovery.unresolved_action !== null);
+  } finally { controller.close(); }
+});
+
+test('desktop_run exposes browser.* in browser scope while blocking desktop.* and lifecycle calls', async () => {
+  const bridge = { generation: 1, child: {}, userStopped: false, async request() { return { ok: true, data: {} }; }, close() {} };
+  const controller = new DesktopController(bridge);
+  controller.browser.scoped = true;
+  controller.browser.request = async (name, args) => {
+    if (name === 'browser_read') return { ok: true, data: { items: [{ ref: 'b1', role: 'button', name: 'Save' }], controls_complete: true } };
+    if (name === 'browser_act') return { ok: true, data: { delivery: 'sent', clicked: args.ref } };
+    return { ok: true, data: {} };
+  };
+  try {
+    const okRun = await controller.request('desktop_run', { code: 'const r=browser.read({tab_id:"t1",operation:"snapshot"}); const btn=browser.one(r,{role:"button",name:"Save"}); const res=browser.act({tab_id:"t1",action:"click",ref:btn.ref}); return { ref: btn.ref, clicked: res.clicked };' });
+    assert.equal(okRun.ok, true);
+    assert.equal(okRun.data.execution_status, 'completed');
+    assert.deepEqual(okRun.data.result, { ref: 'b1', clicked: 'b1' });
+
+    const blockedDesktop = await controller.request('desktop_run', { code: 'return desktop.windows({});' });
+    assert.equal(blockedDesktop.data.execution_status, 'failed');
+    assert.equal(blockedDesktop.data.error.code, 'BROWSER_SCOPE_ACTIVE');
+
+    const blockedLifecycle = await controller.request('desktop_run', { code: 'return browser.session({operation:"end"});' });
+    assert.equal(blockedLifecycle.data.execution_status, 'failed');
+  } finally { controller.close(); }
+});

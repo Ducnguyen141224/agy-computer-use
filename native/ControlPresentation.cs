@@ -41,9 +41,9 @@ internal static class ControlPresentation
             pointer ??= new PointerPresenter();
             Interlocked.Increment(ref owners);
             Interlocked.Exchange(ref until, Environment.TickCount64 + 1800);
-            CursorOverlay.Suspend(false);
             try { form.Wake(); pointer.Wake(); visible = true; WindowHandle = form.Handle; PointerWindowHandle = pointer.Handle; }
             catch { Interlocked.Decrement(ref owners); form.Rest(); pointer.Rest(); throw; }
+            CursorOverlay.Suspend(false);
             return true;
         });
         return new Activity();
@@ -58,7 +58,7 @@ internal static class ControlPresentation
         if (Paused) throw new DesktopError("USER_STOPPED", "Control was stopped with Escape. Inspect the UI; resume only after a new explicit user instruction.", new { delivery = "unknown", resume = "desktop_system control_resume" });
     }
     internal static void Delay(int milliseconds) { if (Stopped.WaitOne(Math.Max(0, milliseconds))) Check(); }
-    internal static object Status() => new { paused = Paused, active = Active, rendered = visible && WindowHandle != IntPtr.Zero, border = "#3B82F6", escape_to_stop = true, idle_hide_ms = 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
+    internal static object Status() => new { paused = Paused, active = Active, rendered = visible && WindowHandle != IntPtr.Zero, border = PresentationTheme.EdgeHex, escape_to_stop = true, idle_hide_ms = 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
     internal static object Resume() { Stopped.Reset(); return Status(); }
     internal static void Stop()
     {
@@ -115,43 +115,39 @@ internal static class ControlPresentation
     {
         private readonly System.Windows.Forms.Timer clock = new() { Interval = 100 };
         internal long Paints;
+        private LayeredSurface? artwork;
+        private Rectangle drawnBounds;
         internal ActivityForm()
         {
             Text = "AGY control indicator"; ShowInTaskbar = false; FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual; Bounds = SystemInformation.VirtualScreen;
-            BackColor = Color.Magenta; TransparencyKey = Color.Magenta; TopMost = true; DoubleBuffered = true;
+            AutoScaleMode = AutoScaleMode.None; TopMost = true;
             clock.Tick += (_, _) =>
             {
                 if (!Active) { Rest(); pointer?.Rest(); visible = false; if (Paused) CursorOverlay.Suspend(true); return; }
-                if (Bounds != SystemInformation.VirtualScreen) Bounds = SystemInformation.VirtualScreen;
-                if (!Visible) { Show(); visible = true; }
+                if (Bounds != SystemInformation.VirtualScreen) { Bounds = SystemInformation.VirtualScreen; DrawArtwork(); }
+                if (!Visible) { Wake(); visible = true; }
             };
             clock.Start();
         }
-        internal void Wake() { clock.Start(); if (!Visible) { Show(); Invalidate(); } }
+        internal void Wake() { clock.Start(); if (!Visible) { DrawArtwork(); Show(); } }
         internal void Rest() { clock.Stop(); if (Visible) Hide(); }
         protected override bool ShowWithoutActivation => true;
         protected override CreateParams CreateParams { get { var p = base.CreateParams; p.ExStyle |= 0x080800A0; return p; } }
         protected override void WndProc(ref Message m) { if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; } if (m.Msg == 0x21) { m.Result = new IntPtr(3); return; } base.WndProc(ref m); }
-        protected override void OnPaint(PaintEventArgs args)
+        private void DrawArtwork()
         {
-            base.OnPaint(args); Paints++;
-            var g = args.Graphics; g.SmoothingMode = SmoothingMode.None; g.TranslateTransform(-Left, -Top);
-            foreach (var screen in Screen.AllScreens)
+            var bounds = SystemInformation.VirtualScreen;
+            if (artwork == null || drawnBounds != bounds)
             {
-                var b = screen.Bounds;
-                using var glow = new Pen(Color.FromArgb(145, 191, 219), 9); using var edge = new Pen(Color.FromArgb(59, 130, 246), 4);
-                g.DrawRectangle(glow, b.X + 4, b.Y + 4, b.Width - 9, b.Height - 9);
-                g.DrawRectangle(edge, b.X + 2, b.Y + 2, b.Width - 5, b.Height - 5);
+                artwork?.Dispose(); artwork = new LayeredSurface(bounds.Width, bounds.Height); drawnBounds = bounds;
+                var g = artwork.Graphics; g.Clear(Color.Transparent); g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TranslateTransform(-bounds.Left, -bounds.Top);
+                foreach (var screen in Screen.AllScreens) PresentationTheme.DrawFrame(g, screen.Bounds);
+                PresentationTheme.DrawLabel(g, Screen.PrimaryScreen!.Bounds); Paints++;
             }
-            var primary = Screen.PrimaryScreen!.Bounds;
-            var pill = new Rectangle(primary.X + (primary.Width - 330) / 2, primary.Y + 18, 330, 38);
-            using var shape = new GraphicsPath(); shape.AddRoundedRectangle(pill, new Size(18, 18));
-            using var background = new SolidBrush(Color.FromArgb(16, 43, 96)); g.FillPath(background, shape);
-            using var font = new Font("Segoe UI", 10f, FontStyle.Bold); using var label = new SolidBrush(Color.FromArgb(239, 246, 255));
-            using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-            g.DrawString("AGY đang điều khiển  ·  ESC để dừng", font, label, pill, format);
+            artwork.Present(Handle, bounds.Left, bounds.Top);
         }
-        protected override void Dispose(bool disposing) { if (disposing) clock.Dispose(); base.Dispose(disposing); }
+        protected override void Dispose(bool disposing) { if (disposing) { clock.Dispose(); artwork?.Dispose(); artwork = null; } base.Dispose(disposing); }
     }
 }

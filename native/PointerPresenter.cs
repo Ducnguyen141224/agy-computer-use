@@ -13,8 +13,7 @@ internal sealed class PointerPresenter : Form
 {
     private const int Side = 112, Inset = 40;
     private readonly FrameClock clock;
-    private readonly IntPtr dc, dib, previous;
-    private readonly Bitmap surface;
+    private readonly LayeredSurface layer;
     private readonly Graphics graphics;
     private readonly Bitmap arrow;
     private readonly Queue<double> intervals = new();
@@ -28,21 +27,17 @@ internal sealed class PointerPresenter : Form
     {
         Text = "AGY animated pointer"; ShowInTaskbar = false; FormBorderStyle = FormBorderStyle.None;
         AutoScaleMode = AutoScaleMode.None; StartPosition = FormStartPosition.Manual; Size = new(Side, Side); TopMost = true;
-        dc = CreateCompatibleDC(IntPtr.Zero);
-        var info = new BitmapInfo { Header = new() { Size = 40, Width = Side, Height = -Side, Planes = 1, BitCount = 32, SizeImage = Side * Side * 4 } };
-        dib = CreateDIBSection(dc, ref info, 0, out var bits, IntPtr.Zero, 0);
-        if (dc == IntPtr.Zero || dib == IntPtr.Zero) { if (dib != IntPtr.Zero) DeleteObject(dib); if (dc != IntPtr.Zero) DeleteDC(dc); throw new DesktopError("PRESENTATION_UNAVAILABLE", "Could not allocate pointer surface."); }
-        previous = SelectObject(dc, dib);
-        surface = new Bitmap(Side, Side, Side * 4, PixelFormat.Format32bppPArgb, bits);
-        graphics = Graphics.FromImage(surface); graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        layer = new LayeredSurface(Side, Side);
+        graphics = layer.Graphics; graphics.SmoothingMode = SmoothingMode.AntiAlias;
         arrow = new Bitmap(32, 38, PixelFormat.Format32bppPArgb);
         using (var paint = Graphics.FromImage(arrow))
         {
             paint.SmoothingMode = SmoothingMode.AntiAlias;
-            using var outline = new Pen(Color.White, 1.5f) { LineJoin = LineJoin.Round };
-            using var ink = new SolidBrush(Color.FromArgb(17, 17, 17));
+            using var outline = new Pen(PresentationTheme.Ice, 1.5f) { LineJoin = LineJoin.Round };
+            using var ink = new SolidBrush(PresentationTheme.Ink);
             PointF[] points = [new(2, 2), new(2, 26), new(8, 20), new(13, 31), new(18, 28), new(13, 18), new(25, 18)];
-            paint.FillPolygon(ink, points); paint.DrawPolygon(outline, points);
+            using var halo = new Pen(Color.FromArgb(30, PresentationTheme.Aura), 4f) { LineJoin = LineJoin.Round };
+            paint.DrawPolygon(halo, points); paint.FillPolygon(ink, points); paint.DrawPolygon(outline, points);
         }
         Native.GetPhysicalCursorPos(out var point); origin = target = new(point.X, point.Y);
         clock = new FrameClock(Tick);
@@ -96,36 +91,23 @@ internal sealed class PointerPresenter : Form
         if (now - pulse is >= 0 and < 440)
         {
             var t = (now - pulse) / 440; var radius = (float)(10 + 27 * t);
-            using var ripple = new Pen(Color.FromArgb((int)(160 * (1 - t)), 59, 130, 246), 2);
+            using var ripple = new Pen(Color.FromArgb((int)(160 * (1 - t)), PresentationTheme.Edge), 2);
             graphics.DrawEllipse(ripple, Inset - radius, Inset - radius, radius * 2, radius * 2);
         }
-        graphics.Flush(FlushIntention.Sync);
-        var position = new Native.Point(left, top); var size = new Native.Point(Side, Side); var source = new Native.Point();
-        var blend = new Blend { Alpha = 255, Format = 1 };
-        if (!UpdateLayeredWindow(Handle, IntPtr.Zero, ref position, ref size, dc, ref source, 0, ref blend, 2)) throw new DesktopError("PRESENTATION_UNAVAILABLE", "Windows could not update the pointer surface.");
+        layer.Present(Handle, left, top);
         if (lastFrame > 0 && now - lastFrame < 100) { intervals.Enqueue(now - lastFrame); if (intervals.Count > 240) intervals.Dequeue(); }
         lastFrame = now; frames++;
     }
     internal object Metrics()
     {
         var sorted = intervals.Order().ToArray();
-        return new { renderer = "small premultiplied-alpha layered window", thread = "dedicated presentation STA", pointer_fill = "#111111", pointer_outline = "#FFFFFF", upload_width = Side, upload_height = Side, uploaded_frames = frames, motion_active = Now - moved < duration, target_hz = 120, high_resolution_clock = clock.HighResolution, sample_count = sorted.Length, median_submit_interval_ms = sorted.Length == 0 ? (double?)null : Math.Round(sorted[sorted.Length / 2], 2), p95_submit_interval_ms = sorted.Length == 0 ? (double?)null : Math.Round(sorted[(int)((sorted.Length - 1) * .95)], 2), note = "Submission timing only; not measured display FPS. RAM counters." };
+        return new { renderer = "small premultiplied-alpha layered window", thread = "dedicated presentation STA", pointer_fill = "#111111", pointer_outline = "#F7FCFF", pointer_accent = PresentationTheme.EdgeHex, upload_width = Side, upload_height = Side, uploaded_frames = frames, motion_active = Now - moved < duration, target_hz = 120, high_resolution_clock = clock.HighResolution, sample_count = sorted.Length, median_submit_interval_ms = sorted.Length == 0 ? (double?)null : Math.Round(sorted[sorted.Length / 2], 2), p95_submit_interval_ms = sorted.Length == 0 ? (double?)null : Math.Round(sorted[(int)((sorted.Length - 1) * .95)], 2), note = "Submission timing only; not measured display FPS. RAM counters." };
     }
     protected override void Dispose(bool disposing)
     {
-        if (disposing && !resourcesReleased) { resourcesReleased = true; clock.Dispose(); graphics.Dispose(); surface.Dispose(); arrow.Dispose(); SelectObject(dc, previous); DeleteObject(dib); DeleteDC(dc); }
+        if (disposing && !resourcesReleased) { resourcesReleased = true; clock.Dispose(); layer.Dispose(); arrow.Dispose(); }
         base.Dispose(disposing);
     }
-    [StructLayout(LayoutKind.Sequential, Pack = 1)] private struct Blend { internal byte Operation, Flags, Alpha, Format; }
-    [StructLayout(LayoutKind.Sequential)] private struct Header { internal uint Size; internal int Width, Height; internal ushort Planes, BitCount; internal uint Compression, SizeImage; internal int XPels, YPels; internal uint Colors, Important; }
-    [StructLayout(LayoutKind.Sequential)] private struct BitmapInfo { internal Header Header; internal uint Color; }
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool UpdateLayeredWindow(IntPtr window, IntPtr screen, ref Native.Point point, ref Native.Point size, IntPtr source, ref Native.Point sourcePoint, uint key, ref Blend blend, uint flags);
-    [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
-    [DllImport("gdi32.dll")] private static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfo info, uint usage, out IntPtr bits, IntPtr section, uint offset);
-    [DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr dc, IntPtr value);
-    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr value);
-    [DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr dc);
-
     private sealed class FrameClock : IDisposable
     {
         private readonly ManualResetEvent active = new(false), stop = new(false);

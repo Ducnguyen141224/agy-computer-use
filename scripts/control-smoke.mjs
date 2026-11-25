@@ -40,7 +40,7 @@ try {
   visualHold.catch(()=>{}); // Preserve the observer's first error during fixture teardown.
   // Layered-window pixels can be dimmed by the compositor. Verify blue hue and
   // a change from the independently captured background, rather than raw SDR intensity.
-  const visual = await waitProbe('visual',v=>v.rendered && v.borders.every((rgb,index)=>rgb[2]>40 && Math.abs(rgb[0]/rgb[2]-59/246)<0.08 && Math.abs(rgb[1]/rgb[2]-130/246)<0.08 && rgb.reduce((sum,n,i)=>sum+Math.abs(n-background[index][i]),0)>15));
+  const visual = await waitProbe('visual',v=>v.rendered && v.borders.every((rgb,index)=>rgb[2]>40 && Math.abs(rgb[0]/rgb[2]-49/255)<0.08 && Math.abs(rgb[1]/rgb[2]-168/255)<0.08 && rgb.reduce((sum,n,i)=>sum+Math.abs(n-background[index][i]),0)>15));
   check(visual.borders.length>0,'blue border is present in real pixels on every attached display');
   check(visual.click_through && visual.no_activate && visual.foreground===fixture.pid,'indicator is click-through and never takes foreground focus');
   await visualHold;
@@ -57,9 +57,9 @@ try {
   const capture = await client.callTool({name:'desktop_capture',arguments:{window_id,region:cursorRegion,mode:'screen',max_dimension:200}});
   assert.equal(capture.isError,false,capture.content[0].text);
   const cursorImage=capture.content.find(item=>item.type==='image').data;
-  let black=0,white=0,magenta=0;
-  for(let y=1;y<47;y+=2) for(let x=1;x<45;x+=2) { const rgb=pixel(cursorImage,x,y); if(rgb.slice(0,3).every(n=>n>=10&&n<27))black++; if(rgb.slice(0,3).every(n=>n>240))white++; if(rgb[0]>180&&rgb[1]<80&&rgb[2]>180)magenta++; }
-  check(black>25 && white>3,'default arrow is black with a white outline in actual display pixels');
+  let black=0,ice=0,magenta=0;
+  for(let y=1;y<47;y+=2) for(let x=1;x<45;x+=2) { const rgb=pixel(cursorImage,x,y); if(rgb.slice(0,3).every(n=>n>=10&&n<27))black++; if(rgb[2]>245&&rgb[1]>215&&rgb[0]>=180&&rgb[0]<235)ice++; if(rgb[0]>180&&rgb[1]<80&&rgb[2]>180)magenta++; }
+  check(black>25 && ice>5,'default arrow has a black body and cool blue luminous outline in actual display pixels');
   check(magenta===0,'per-pixel alpha leaves no magenta color-key fringe around the pointer');
   check((await inspect('visual')).pointer_visible,'the small animated pointer is independently visible before physical input');
   await call('desktop_act',{action:'click',ref:pad.ref,modifiers:['ctrl']});

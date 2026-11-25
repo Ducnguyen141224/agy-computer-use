@@ -46,16 +46,19 @@ export const tools = [
   },
   {
     name: 'desktop_act',
-    description: 'Perform ONE UI action, optionally wait for a postcondition. Ref required except focus_window/click_point (window_id). set_value replaces text; type_text inserts at focused caret. check/uncheck are idempotent. No automatic retries.',
+    description: 'Perform ONE UI action, optionally wait for a postcondition and auto-observe UI changes. Ref required except focus_window/click_point/click_mark (window_id). set_value replaces text; type_text inserts at focused caret. check/uncheck are idempotent. auto_scroll scrolls ScrollItem targets into view when offscreen.',
     inputSchema: object({
-      action: { type: 'string', enum: ['click', 'right_click', 'double_click', 'triple_click', 'hover', 'drag', 'set_value', 'clear', 'check', 'uncheck', 'toggle', 'select', 'expand', 'collapse', 'scroll', 'scroll_into_view', 'focus', 'focus_window', 'type_text', 'press_key', 'click_point', 'mouse_move', 'mouse_wheel', 'drag_point'] },
+      action: { type: 'string', enum: ['click', 'right_click', 'double_click', 'triple_click', 'hover', 'drag', 'set_value', 'clear', 'check', 'uncheck', 'toggle', 'select', 'expand', 'collapse', 'scroll', 'scroll_into_view', 'focus', 'focus_window', 'type_text', 'press_key', 'click_point', 'mouse_move', 'mouse_wheel', 'drag_point', 'click_mark'] },
       agent: string(80), ref, window_id: windowId, text: string(10000), option: string(1000),
       direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] },
       amount: { type: 'string', enum: ['small', 'large'], default: 'small' },
       steps: integer(1, 30),
       key: string(50), force: { type: 'boolean' }, to_ref: ref, to_window_id: windowId, to_capture_id: string(100), button: { type: 'string', enum: ['left', 'right', 'middle'] }, count: integer(1, 3), modifiers: { type: 'array', maxItems: 4, items: { type: 'string', enum: ['ctrl', 'alt', 'shift', 'win'] } },
       duration_ms: integer(80, 2000), drop_delay_ms: integer(0, 2000), to_x: integer(0, 1599), to_y: integer(0, 1599), vertical: integer(-2400, 2400), horizontal: integer(-2400, 2400),
-      capture_id: string(100), x: integer(0, 1599), y: integer(0, 1599),
+      capture_id: string(100), x: integer(0, 1599), y: integer(0, 1599), mark: integer(1, 60),
+      auto_scroll: { type: 'boolean', default: true },
+      observe_after: { type: 'string', enum: ['none', 'diff', 'snapshot'], default: 'none' },
+      settle_ms: integer(0, 1500, 120),
       interval_ms: integer(1, 2000), timeout_ms: integer(0, 5000, 1800),
       expect: object({ ref, property: { type: 'string', enum: ['value', 'name', 'checked', 'selected', 'expanded', 'exists', 'focused', 'window_title'] }, equals: { type: ['string', 'boolean'], maxLength: 10000 } }, ['property', 'equals'])
     }, ['action']),
@@ -80,7 +83,7 @@ export const tools = [
       cdp: { type: 'boolean' }, cdp_port: integer(0, 65535), profile_dir: string(2048),
       x: integer(-32768, 32767), y: integer(-32768, 32767), width: integer(100, 8192), height: integer(80, 8192),
       force: { type: 'boolean' }, format: { type: 'string', enum: ['text', 'auto', 'image', 'files'] }, file_paths: { type: 'array', minItems: 1, maxItems: 64, items: string(2048) },
-      text: string(60000), image_path: string(2048), image: { type: 'boolean' }, token: string(120), limit: integer(1, 12000),
+      text: string(60000), image_path: string(2048), image: { type: 'boolean' }, token: string(120), limit: integer(1, 12000), label: string(160),
       surface: { type: 'string', enum: ['start_menu', 'taskbar', 'system_tray', 'system_tray_overflow', 'action_center', 'quick_settings', 'focused', 'menu', 'dialog', 'sheet', 'alert', 'tooltip'] }, open: { type: 'boolean' }, diagnostic: { type: 'boolean' }
     }, ['operation']),
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true }
@@ -113,13 +116,13 @@ export const tools = [
   },
   {
     name: 'desktop_capture',
-    description: 'Capture in RAM: window_id uses Windows.Graphics.Capture when occluded; mode screen reads visible window pixels. Or choose display_id from list_displays for a visible full display. Image coordinates map through a single-use capture_id valid 10s; point input still requires a selected foreground window. region is native pixels relative to the chosen window/display.',
-    inputSchema: object({ window_id: windowId, display_id: string(200), mode: { type: 'string', enum: ['window', 'screen'] }, max_dimension: integer(200, 1600, 1000), region: object({ x: integer(0, 32768), y: integer(0, 32768), width: integer(1, 8192), height: integer(1, 8192) }, ['x', 'y', 'width', 'height']) }),
+    description: 'Capture in RAM: window_id uses Windows.Graphics.Capture when occluded; mode screen reads visible window pixels. Or choose display_id from list_displays for a visible full display. annotate=true draws numbered Set-of-Marks badges usable with click_mark. Single-use capture_id valid 10s.',
+    inputSchema: object({ window_id: windowId, display_id: string(200), mode: { type: 'string', enum: ['window', 'screen'] }, max_dimension: integer(200, 1600, 1000), annotate: { type: 'boolean' }, max_marks: integer(1, 60, 40), region: object({ x: integer(0, 32768), y: integer(0, 32768), width: integer(1, 8192), height: integer(1, 8192) }, ['x', 'y', 'width', 'height']) }),
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false }
   },
   {
     name: 'desktop_run',
-    description: 'Run bounded synchronous JavaScript against desktop APIs in a persistent isolated RAM runtime. Load desktop_help topic runtime first. Variables stored in global state survive successful calls. A first failed step halts execution even if caught; no input is replayed. Return only the fields needed for the next decision.',
+    description: 'Run bounded synchronous JavaScript against desktop.* or browser.* APIs (when a browser session is active) in a persistent isolated RAM runtime. Load desktop_help topic runtime first. Variables in state survive successful calls. A first failed step halts execution.',
     inputSchema: object({ code: string(20000), max_steps: integer(1, 80, 20), timeout_ms: integer(100, 30000, 12000) }, ['code']),
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true }
   },
@@ -148,6 +151,7 @@ export function validate(schema, value, path = 'arguments') {
   const validType = types.some(type => type === 'integer' ? Number.isInteger(value) : type === 'object' ? kind === 'object' && value !== null : kind === type);
   if (!validType) throw new Error(`${path} has the wrong type.`);
   if (schema.enum && !schema.enum.includes(value)) throw new Error(`${path} is not a supported value.`);
+  if (typeof value === 'string' && value.length < (schema.minLength ?? 0)) throw new Error(`${path} is too short.`);
   if (typeof value === 'string' && value.length > (schema.maxLength ?? Infinity)) throw new Error(`${path} is too long.`);
   if (typeof value === 'string' && schema.pattern && !new RegExp(schema.pattern).test(value)) throw new Error(`${path} has an invalid format.`);
   if (typeof value === 'number' && (!Number.isFinite(value) || value < (schema.minimum ?? -Infinity) || value > (schema.maximum ?? Infinity))) throw new Error(`${path} is out of range.`);
@@ -185,10 +189,15 @@ export function validateCall(tool, args) {
     if (args.steps !== undefined && args.action !== 'scroll') throw new Error('steps applies to semantic scroll only.');
     if (args.interval_ms !== undefined && (args.action !== 'type_text' || [...(args.text ?? '')].length * args.interval_ms > 8000)) throw new Error('interval_ms applies to type_text and total typing delay must fit 8000 ms.');
     if (args.interval_ms !== undefined && [...(args.text ?? '')].length * args.interval_ms + (args.timeout_ms ?? 1800) > 10000) throw new Error('Typing delay plus verification timeout must fit 10000 ms.');
-    if (args.modifiers && (new Set(args.modifiers).size !== args.modifiers.length || !['click', 'right_click', 'double_click', 'triple_click', 'click_point', 'mouse_wheel', 'drag', 'drag_point'].includes(args.action))) throw new Error('Unique modifiers apply to click, wheel or drag gestures.');
+    if (args.modifiers && (new Set(args.modifiers).size !== args.modifiers.length || !['click', 'right_click', 'double_click', 'triple_click', 'click_point', 'mouse_wheel', 'drag', 'drag_point', 'click_mark'].includes(args.action))) throw new Error('Unique modifiers apply to click, wheel or drag gestures.');
     const point = ['click_point', 'mouse_move', 'mouse_wheel', 'drag_point'].includes(args.action);
-    if (point || args.action === 'focus_window') requireKeys('window_id'); else requireKeys('ref');
+    const isMark = args.action === 'click_mark';
+    if (point || isMark || args.action === 'focus_window') requireKeys('window_id'); else requireKeys('ref');
     if (point) requireKeys('capture_id', 'x', 'y');
+    if (isMark) {
+      requireKeys('capture_id', 'mark');
+      if (args.ref !== undefined || args.x !== undefined || args.y !== undefined) throw new Error('click_mark uses window_id, capture_id and mark.');
+    } else if (args.mark !== undefined) throw new Error('mark applies to click_mark only.');
     if (['drag', 'drag_point'].includes(args.action)) {
       if (args.to_ref !== undefined) {
         if (['to_window_id', 'to_capture_id', 'to_x', 'to_y'].some(key => args[key] !== undefined)) throw new Error('Choose a destination ref or capture point, not both.');
@@ -234,6 +243,7 @@ export function validateCall(tool, args) {
   if (tool.name === 'desktop_capture') {
     if ((args.window_id === undefined) === (args.display_id === undefined)) throw new Error('Capture needs exactly one window_id or display_id.');
     if (args.display_id !== undefined && args.mode !== undefined) throw new Error('display_id already selects display capture; omit mode.');
+    if (args.annotate && args.display_id !== undefined) throw new Error('Annotated Set-of-Marks capture requires window_id.');
   }
   if (tool.name === 'desktop_system') {
     if (['window_info', 'focus_window', 'move', 'resize', 'minimize', 'maximize', 'restore', 'close_window', 'close_app', 'close_surface'].includes(args.operation)) requireKeys('window_id');

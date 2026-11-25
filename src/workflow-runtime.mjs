@@ -28,15 +28,20 @@ export class WorkflowRuntime {
   async run(code, { timeout_ms, dispatch, signal }) {
     if (this.closed || this.running) throw new Error('Runtime is closed or busy.');
     return new Promise(resolve => {
-      let finished = false;
-      const finish = result => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); this.running = null; resolve(result); };
+      let finished = false, timer = null, initTimer = null;
+      const finish = result => { if (finished) return; finished = true; clearTimeout(initTimer); clearTimeout(timer); signal?.removeEventListener('abort', abort); this.running = null; resolve(result); };
       const interrupt = code => { this.close(); finish({ ok: false, error: { code, message: 'Workflow was interrupted. Inspect current UI before any further input; no action was retried.' } }); };
       const abort = () => interrupt('CANCELLED');
-      const timer = setTimeout(() => interrupt('RUNTIME_TIMEOUT'), timeout_ms);
+      initTimer = setTimeout(() => interrupt('RUNTIME_TIMEOUT'), Math.max(timeout_ms, 5000));
       this.running = { dispatch, finish, settled: false };
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) { abort(); return; }
-      this.ready.then(() => { if (!finished) this.worker.postMessage({ type: 'run', code, timeout_ms }); }, () => interrupt('RUNTIME_EXITED'));
+      this.ready.then(() => {
+        if (finished) return;
+        clearTimeout(initTimer);
+        timer = setTimeout(() => interrupt('RUNTIME_TIMEOUT'), timeout_ms);
+        this.worker.postMessage({ type: 'run', code, timeout_ms });
+      }, () => interrupt('RUNTIME_EXITED'));
     });
   }
   close() { if (this.closed) return; this.closed = true; this.worker.terminate(); }

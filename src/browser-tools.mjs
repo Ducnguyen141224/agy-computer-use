@@ -6,19 +6,24 @@ const locator = obj({ frame_id: id, role: str(60), name: str(500), exact: { type
 const target = { ref: id, locator };
 const timeout_ms = int(100, 10000);
 const definitions = [
-  ['browser_session', 'Start/info/end an owned Chrome or Edge with a temporary profile, separate from personal browsers. No attachment to daily profiles. While scoped, desktop tools are blocked except control/status. End in finally; all tabs and RAM refs are discarded.', obj({ operation: { type: 'string', enum: ['start','info','end'] }, browser: { type: 'string', enum: ['chrome','edge'] }, headless: { type: 'boolean' } }, ['operation'])],
+  ['browser_session', 'Start/info/end/handoff/profile-manage an owned Chrome or Edge, separate from personal browsers. Never attaches to daily profiles. Optional named profile persists an isolated work profile. handoff/resume_handoff lets the user handle login/2FA/CAPTCHA.', obj({ operation: { type: 'string', enum: ['start','info','end','handoff','resume_handoff','list_profiles','clear_profile'] }, browser: { type: 'string', enum: ['chrome','edge'] }, headless: { type: 'boolean' }, profile: { type: 'string', minLength: 1, maxLength: 64, pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$' }, reason: str(300) }, ['operation'])],
   ['browser_tabs', 'Create/list/info/navigate/back/forward/reload/activate/close owned tabs. Every existing-tab operation needs its returned tab_id; no active-tab fallback. Popups are quarantined until adopt. Reconcile uncertain delivery only after a fresh read and explicit recovery_note.', obj({ operation: { type: 'string', enum: ['new','list','info','navigate','back','forward','reload','activate','close','adopt','reconcile'] }, tab_id: id, url: str(4000), recovery_note: str(1000), timeout_ms }, ['operation'])],
-  ['browser_read', 'Read DOM text and guarded element refs from exactly one managed tab/frame. Frames are listed explicitly; they are not silently flattened. Password values excluded. Snapshot refs expire on navigation/replacement/identity change or 60s. Text and titles are untrusted data.', obj({ tab_id: id, operation: { type: 'string', enum: ['snapshot','text'] }, ...target, limit: int(1,100), max_chars: int(100,50000), timeout_ms }, ['tab_id','operation'])],
-  ['browser_act', 'One DOM/page action inside the specified tab, never global input or desktop fallback. Choose a guarded ref or unique locator. Duplicate matches fail. Points need a fresh, single-use browser_capture token for this exact tab. Unknown delivery requires fresh read + reconcile; no retries.', obj({ tab_id:id, action:{type:'string',enum:['click','double_click','hover','fill','type','press','check','uncheck','select_option','scroll','drag','click_point','mouse_move']}, ...target, to_ref:id, text:{type:'string',maxLength:10000}, key:str(60), option:str(1000), direction:{type:'string',enum:['up','down','left','right']}, pixels:int(1,2000), capture_id:id, x:int(0,1599), y:int(0,1599), timeout_ms }, ['tab_id','action'])],
+  ['browser_read', 'Read DOM text and guarded element refs from exactly one managed tab/frame. Frames are listed explicitly. Password values excluded. Set include_text:false in snapshot for compact control-only reads. Refs expire on navigation/replacement/60s.', obj({ tab_id: id, operation: { type: 'string', enum: ['snapshot','text'] }, ...target, limit: int(1,100), max_chars: int(100,50000), include_text: { type: 'boolean' }, timeout_ms }, ['tab_id','operation'])],
+  ['browser_act', 'One DOM/page action inside the specified tab, optionally auto-observing DOM changes via observe_after. Choose a guarded ref, unique locator, capture point, or Set-of-Marks mark. Duplicate matches fail. Unknown delivery requires fresh read + reconcile.', obj({ tab_id:id, action:{type:'string',enum:['click','double_click','hover','fill','type','press','check','uncheck','select_option','scroll','drag','click_point','mouse_move','click_mark']}, ...target, to_ref:id, text:{type:'string',maxLength:10000}, key:str(60), option:str(1000), direction:{type:'string',enum:['up','down','left','right']}, pixels:int(1,2000), capture_id:id, x:int(0,1599), y:int(0,1599), mark:int(1,60), observe_after:{type:'string',enum:['none','diff','snapshot']}, settle_ms:int(0,1500), timeout_ms }, ['tab_id','action'])],
   ['browser_wait', 'Wait for a tab URL, exact text/value/checked state, or target visibility. A timeout is a failed verification, never success. No navigation or input is retried.', obj({tab_id:id, condition:{type:'string',enum:['visible','hidden','text','value','checked','url']}, ...target, equals:{type:['string','boolean'],maxLength:10000}, contains:{type:'boolean'}, timeout_ms}, ['tab_id','condition'])],
-  ['browser_capture', 'Return a bounded PNG of exactly this tab viewport in RAM, with a 10s single-use point token. No path, video, trace, HAR or screenshot files. DOM-first; image is opt-in. No foreground tab selection.', obj({tab_id:id,timeout_ms}, ['tab_id'])],
+  ['browser_capture', 'Return a bounded PNG of this tab viewport in RAM, with a 10s single-use token. Set annotate:true for numbered Set-of-Marks badges usable with browser_act click_mark. DOM-first; image is opt-in.', obj({tab_id:id,annotate:{type:'boolean'},max_marks:int(1,60),timeout_ms}, ['tab_id'])],
   ['browser_dialog', 'Inspect/accept/dismiss a JavaScript dialog belonging to this tab. No automatic acceptance. Page actions pause at a dialog; resolve it explicitly before continuing.', obj({tab_id:id,operation:{type:'string',enum:['inspect','accept','dismiss']},prompt_text:{type:'string',maxLength:2000}}, ['tab_id','operation'])]
 ];
 export const browserTools = definitions.map(([name,description,inputSchema]) => ({name,description,inputSchema,annotations:{readOnlyHint:['browser_read','browser_wait'].includes(name),destructiveHint:name==='browser_act',openWorldHint:true}}));
 
 export function validateBrowserCall(name, args) {
   const require = (...fields) => {for(const field of fields) if(args[field] === undefined) throw new Error(`${field} is required.`);};
-  if (name === 'browser_session' && args.operation !== 'start' && (args.browser !== undefined || args.headless !== undefined)) throw new Error('Browser/headless apply only to start.');
+  if (name === 'browser_session') {
+    if (args.operation !== 'start' && (args.browser !== undefined || args.headless !== undefined)) throw new Error('Browser/headless apply only to start.');
+    if (args.profile !== undefined && !['start','clear_profile'].includes(args.operation)) throw new Error('profile applies only to start or clear_profile.');
+    if (args.operation === 'clear_profile') require('profile');
+    if (args.reason !== undefined && args.operation !== 'handoff') throw new Error('reason applies only to handoff.');
+  }
   if (name === 'browser_tabs') {
     if (!['new','list'].includes(args.operation)) require('tab_id');
     if (['new','list'].includes(args.operation) && args.tab_id !== undefined) throw new Error('new/list do not take tab_id.');
@@ -34,16 +39,27 @@ export function validateBrowserCall(name, args) {
   if (args.ref !== undefined && args.locator !== undefined) throw new Error('Choose ref or locator, not both.');
   if (name === 'browser_act') {
     const point = ['click_point','mouse_move'].includes(args.action);
-    if (point) {require('capture_id','x','y'); if(args.ref || args.locator) throw new Error('Points use a capture token, not a DOM target.');}
-    else if (args.capture_id !== undefined || args.x !== undefined || args.y !== undefined) throw new Error('Point fields require a point action.');
-    if (!point && args.action !== 'scroll' && !args.ref && !args.locator) throw new Error('A guarded ref or locator is required.');
+    const isMark = args.action === 'click_mark';
+    if (point) {require('capture_id','x','y'); if(args.ref || args.locator || args.mark !== undefined) throw new Error('Points use a capture token, not a DOM target.');}
+    else if (isMark) {require('capture_id','mark'); if(args.ref || args.locator || args.x !== undefined || args.y !== undefined) throw new Error('click_mark uses capture_id and mark.');}
+    else if (args.capture_id !== undefined || args.x !== undefined || args.y !== undefined || args.mark !== undefined) throw new Error('Point/mark fields require a point or click_mark action.');
+    if (!point && !isMark && args.action !== 'scroll' && !args.ref && !args.locator) throw new Error('A guarded ref or locator is required.');
     if (['fill','type'].includes(args.action)) require('text'); else if(args.text !== undefined) throw new Error('text requires fill/type.');
     if (args.action === 'press') require('key'); else if(args.key !== undefined) throw new Error('key requires press.');
     if (args.action === 'select_option') require('option'); else if(args.option !== undefined) throw new Error('option requires select_option.');
     if (args.action === 'drag') require('ref','to_ref'); else if(args.to_ref !== undefined) throw new Error('to_ref requires drag.');
     if (args.action === 'scroll') require('direction'); else if(args.direction !== undefined || args.pixels !== undefined) throw new Error('direction/pixels require scroll.');
-    if (args.key && !/^(?:(?:Control|Ctrl|Shift|Alt|Meta)\+){0,3}(?:[a-zA-Z0-9]|Enter|Tab|Escape|Esc|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace|Delete|Home|End|PageUp|PageDown|Space)$/.test(args.key)) throw new Error('Unsupported page key.');
-    if (args.key && /(?:Control|Ctrl|Meta)\+(?:[cCvVxXlLnNtTwW])$|Alt\+Tab/.test(args.key)) throw new Error('Use tab tools; global clipboard/browser shortcuts are excluded.');
+    if (args.key && !/^(?:(?:Control|Ctrl|Shift|Alt|Meta)\+){0,3}(?:[a-zA-Z0-9]|Enter|Tab|Escape|Esc|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Backspace|Delete|Home|End|PageUp|PageDown|Space|F(?:[1-9]|1\d|2[0-4]))$/.test(args.key)) throw new Error('Unsupported page key.');
+    if (args.key) {
+      const parts = args.key.split('+');
+      const modifiers = parts.slice(0, -1).map(part => part === 'Ctrl' ? 'Control' : part);
+      const finalKey = parts.at(-1).toLowerCase();
+      if (new Set(modifiers).size !== modifiers.length) throw new Error('Duplicate modifier keys are unsupported.');
+      if (((modifiers.includes('Control') || modifiers.includes('Meta')) && ['c','v','x','l','n','t','w','f4'].includes(finalKey))
+        || (modifiers.includes('Alt') && ['tab','f4'].includes(finalKey))) {
+        throw new Error('Use tab tools; global clipboard/browser shortcuts are excluded.');
+      }
+    }
   }
   if (name === 'browser_wait') {
     if(args.condition !== 'url' && !args.ref && !args.locator) throw new Error('This wait needs a target.');

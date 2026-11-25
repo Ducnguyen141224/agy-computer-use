@@ -32,11 +32,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 const shutdown = async () => { await controller.close(); await server.close(); };
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
-process.stdin.once('end', () => controller.close());
+process.stdin.once('end', () => void controller.close().catch(() => {}));
 try {
   await server.connect(new StdioServerTransport());
 } catch {
-  controller.close();
+  await controller.close().catch(() => {});
   process.stderr.write('Computer use MCP failed to start. Check Node.js and dependencies.\n');
   process.exitCode = 1;
 }

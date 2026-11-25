@@ -30,6 +30,14 @@ export class TaskContext {
       if (!this.uncertainty || this.readRevision <= this.uncertainty.revision) throw Object.assign(new Error('Read the current UI after the uncertain action before reconciling. No action was sent.'), { code: 'FRESH_READ_REQUIRED' });
       this.recovery_note = args.recovery_note; this.uncertainty = null; this.revision++;
     }
+    if (args.operation === 'compact') {
+      const bound = (value, max) => value.length <= max ? value : value.slice(0, max);
+      this.goal = bound(this.goal, 400);
+      this.constraints = this.constraints.slice(0, 8).map(item => bound(item, 160));
+      this.next_step = bound(this.next_step, 300);
+      this.verified = this.verified.slice(-3);
+      this.revision++;
+    }
     return { session_id, revision: this.revision, goal: this.goal, constraints: this.constraints, next_step: this.next_step, window_id: this.window_id, last_observation: this.observation, verified_conditions: this.verified, unresolved_action: this.uncertainty, needs_observation: this.needs_observation, recovery_note: this.recovery_note, memory_only: true, note: 'Task notes are not live refs or authorization. This does not compact the host conversation or prove task completion.' };
   }
 }

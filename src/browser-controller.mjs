@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium } from 'playwright-core';
+import { annotatePng } from './som-png.mjs';
 
 export class BrowserError extends Error {
   constructor(code, message, details) { super(message); this.code=code; this.details=details; }
@@ -24,29 +28,57 @@ function elementInfo(element) {
   const password=tag==='input' && type==='password';
   const value=password?undefined:tag==='input'||tag==='textarea'||tag==='select'?String(element.value??'').slice(0,10000):undefined;
   const box=element.getBoundingClientRect(); const style=getComputedStyle(element);
-  return {tag,type,role,name:name.slice(0,500),password,value,checked:typeof element.checked==='boolean'?element.checked:undefined,disabled:!!element.disabled||element.getAttribute('aria-disabled')==='true',visible:box.width>0&&box.height>0&&style.visibility!=='hidden'&&style.display!=='none',href:element.closest('a[href]')?.href??null,bounds:{x:box.x,y:box.y,width:box.width,height:box.height}};
+  return {tag,type,role,name:name.slice(0,500),password,value,checked:typeof element.checked==='boolean'?element.checked:undefined,disabled:!!element.disabled||element.getAttribute('aria-disabled')==='true',visible:box.width>0&&box.height>0&&style.visibility!=='hidden'&&style.display!=='none',href:element.closest('a[href]')?.href??null,bounds:{x:Math.round(box.x),y:Math.round(box.y),width:Math.round(box.width),height:Math.round(box.height)}};
 }
 const identity = item => JSON.stringify([item.tag,item.type,item.role,item.name,item.href]);
 
 export class BrowserController {
   constructor(bridge) {
     this.bridge=bridge; this.browser=null; this.context=null; this.scoped=false; this.sessionId=null;
-    this.tabs=new Map(); this.pages=new WeakMap(); this.interrupted=null; this.generation=0; this.closing=null;
+    this.tabs=new Map(); this.pages=new WeakMap(); this.interrupted=null; this.generation=0; this.closing=null; this.refSeq=0;
+    this.persistentProfile=null; this.starterPage=null; this.handoff=null; this.contextClosed=false; this.headless=false; this.channel=undefined;
   }
-  get active() {return !!this.browser?.isConnected() && !!this.context;}
-  #summary() {return {session_id:this.sessionId,active:this.active,scoped:this.scoped,browser:this.channel,headless:this.headless,tab_count:[...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length,stop_reason:this.interrupted,transport:'Playwright pipe; owned temporary browser profile',personal_profile_attached:false,desktop_fallback:false,memory_only_content:true};}
+  get active() {return (this.browser ? this.browser.isConnected() : !this.contextClosed) && !!this.context;}
+  #profilesRoot() {return join(process.env.LOCALAPPDATA ?? tmpdir(), 'agy-computer-use', 'profiles');}
+  #profileDir(name) {
+    if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)) fail('INVALID_ARGUMENT','Invalid profile name.');
+    return join(this.#profilesRoot(), name);
+  }
+  #listProfiles() {
+    const root=this.#profilesRoot();
+    if(!existsSync(root)) return [];
+    return readdirSync(root, {withFileTypes:true}).filter(d=>d.isDirectory()&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(d.name)).map(d=>d.name).sort();
+  }
+  #clearProfile(name) {
+    if(this.active && this.persistentProfile===name) fail('PROFILE_IN_USE','End the active session using this profile before clearing it.');
+    const dir=this.#profileDir(name);
+    const existed=existsSync(dir);
+    if(existed) rmSync(dir, {recursive:true, force:true});
+    return {profile:name, cleared:true, existed};
+  }
+  #summary() {return {session_id:this.sessionId,active:this.active,scoped:this.scoped,browser:this.channel,headless:this.headless,profile:this.persistentProfile??null,persistent_profile:!!this.persistentProfile,handoff:this.handoff,tab_count:[...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length,stop_reason:this.interrupted,transport:this.persistentProfile?'Playwright pipe; isolated agent work profile':'Playwright pipe; owned temporary browser profile',personal_profile_attached:false,desktop_fallback:false,memory_only_content:true};}
   async request(name,args,{signal}={}) {
-    let entry=null, mutating=false, timer, abort, cancelledCleanup;
+    let entry=null, createdPage=null, mutating=false, timer, abort, cancelledCleanup;
     try {
       if(name==='browser_session' && args.operation==='info') return {ok:true,data:this.#summary()};
       if(name==='browser_session' && args.operation==='end') {await this.close(); return {ok:true,data:{...this.#summary(),ended:true}};}
+      if(name==='browser_session' && args.operation==='list_profiles') return {ok:true,data:{profiles:this.#listProfiles(),personal_profile_attached:false}};
+      if(name==='browser_session' && args.operation==='clear_profile') return {ok:true,data:this.#clearProfile(args.profile)};
       if(signal?.aborted) fail('CANCELLED','Browser request cancelled before execution.',{delivery:'not_sent'});
       if(name==='browser_tabs' && args.operation==='list') {
         this.#connected(); return {ok:true,data:{...this.#summary(),tabs:await Promise.all([...this.tabs.values()].filter(tab=>!tab.page.isClosed()).map(tab=>this.#tabInfo(tab)))}};
       }
-      if(args.tab_id) entry=this.#tab(args.tab_id, name==='browser_tabs' && ['adopt','close','info'].includes(args.operation));
+      if(args.tab_id) {
+        const allowUnmanaged=name==='browser_tabs' && ['adopt','close','info'].includes(args.operation);
+        const allowNonHttp=allowUnmanaged || (name==='browser_tabs' && ['navigate','back','forward','reload','reconcile'].includes(args.operation));
+        entry=this.#tab(args.tab_id, allowUnmanaged, allowNonHttp);
+      }
+      const isHeadless=(name==='browser_session' && args.operation==='start') ? args.headless===true : this.headless===true;
       const scope=await this.bridge.request('system',{operation:'control_start'},{signal});
-      if(!scope.ok) {if(scope.error?.code==='USER_STOPPED') this.stop('USER_STOPPED'); return scope;}
+      if(!scope.ok) {
+        if(scope.error?.code==='USER_STOPPED') {this.stop('USER_STOPPED'); return scope;}
+        if(!(isHeadless && scope.error?.code==='DESKTOP_UNAVAILABLE')) return scope;
+      }
       if(this.bridge.userStopped) fail('USER_STOPPED','Control was stopped; resume only after a new explicit user request.');
       if(this.interrupted==='USER_STOPPED') this.interrupted=null; // Only the bridge's explicit control_resume can clear its latch.
       const timeout=args.timeout_ms??(name==='browser_session'?15000:5000);
@@ -54,9 +86,11 @@ export class BrowserController {
       const cancellation=new Promise((_,reject)=>{
         const cancel=(code='CANCELLED')=>{
           cancelled=code;
-          // Closing the exact target prevents Playwright's internal waits from delivering input later.
-          const cleanup=entry?entry.page.close({runBeforeUnload:false}):this.stop(code);
-          cancelledCleanup=Promise.resolve(cleanup).catch(()=>{});
+          // Closing only the active mutating target or newly-created page prevents killing healthy tabs on read timeouts.
+          const cleanup=entry
+            ?(mutating||code==='USER_STOPPED'?entry.page.close({runBeforeUnload:false}):null)
+            :(createdPage?createdPage.close({runBeforeUnload:false}):(name==='browser_session'||code==='USER_STOPPED'?this.stop(code):null));
+          cancelledCleanup=cleanup?Promise.resolve(cleanup).catch(()=>{}):null;
           reject(new BrowserError(code,code==='BROWSER_TIMEOUT'?'Browser operation exceeded its time budget; no action was replayed.':'Browser operation was cancelled; no action was replayed.',{delivery:mutating?'unknown':'not_sent'}));
         };
         abort=()=>cancel('CANCELLED');
@@ -66,15 +100,24 @@ export class BrowserController {
       });
       const work=(async()=>{
         if(cancelled||signal?.aborted) fail('CANCELLED','Browser request cancelled before execution.',{delivery:'not_sent'});
-        if(name==='browser_session') return this.#start(args);
+        if(name==='browser_session') {
+          if(args.operation==='start') return this.#start(args);
+          if(args.operation==='handoff') return this.#handoff(args);
+          if(args.operation==='resume_handoff') return this.#resumeHandoff();
+          fail('INVALID_ARGUMENT','Unsupported browser_session operation.');
+        }
         this.#connected();
-        if(name==='browser_tabs') return this.#tabs(args,entry,timeout,()=>{mutating=true;});
+        if(name==='browser_tabs') return this.#tabs(args,entry,timeout,()=>{mutating=true;},page=>{createdPage=page;});
         if(entry.dialog && name!=='browser_dialog') fail('BROWSER_DIALOG_OPEN','Resolve this tab dialog explicitly before another page operation.');
         if(name==='browser_read') return this.#read(entry,args,timeout);
-        if(name==='browser_capture') return this.#capture(entry,timeout);
+        if(name==='browser_capture') return this.#capture(entry,args,timeout);
         if(name==='browser_wait') return this.#wait(entry,args,timeout);
-        if(name==='browser_dialog') return this.#dialog(entry,args,()=>{mutating=true;});
+        if(name==='browser_dialog') {
+          if(this.handoff?.active && ['accept','dismiss'].includes(args.operation)) fail('USER_HANDOFF_ACTIVE','User handoff is active. Call browser_session resume_handoff after user finishes.');
+          return this.#dialog(entry,args,()=>{mutating=true;});
+        }
         if(name==='browser_act') {
+          if(this.handoff?.active) fail('USER_HANDOFF_ACTIVE','User handoff is active. Call browser_session resume_handoff after user finishes.');
           if(entry.uncertain) fail('RECONCILIATION_REQUIRED','Read this tab and explicitly reconcile before new input.',{delivery:'not_sent'});
           return this.#act(entry,args,timeout,()=>{mutating=true;});
         }
@@ -94,36 +137,74 @@ export class BrowserController {
     }
   }
   #connected() {if(this.interrupted==='NATIVE_CONTROL_LOST') fail('NATIVE_CONTROL_LOST','Native Escape/control helper was lost. The owned browser was stopped; explicitly end/start the session.');if(!this.active) fail(this.interrupted==='USER_STOPPED'?'USER_STOPPED':'BROWSER_DISCONNECTED','No connected owned browser session. Start one explicitly; there is no desktop fallback.');}
-  #tab(id, allowUnmanaged=false) {
+  #tab(id, allowUnmanaged=false, allowNonHttpUrl=allowUnmanaged) {
     this.#connected(); const entry=this.tabs.get(id);
     if(!entry) fail('TAB_NOT_OWNED','tab_id does not belong to this browser session.');
     if(entry.page.isClosed()) fail('TAB_CLOSED','This tab is closed. It was not replaced with the active tab.');
     if(!entry.managed&&!allowUnmanaged) fail('POPUP_NOT_ADOPTED','Popup is quarantined. Adopt its returned tab_id explicitly before controlling it.');
-    if(!allowUnmanaged) browserUrl(entry.page.url());
+    if(!allowNonHttpUrl) browserUrl(entry.page.url());
     return entry;
   }
   async #start(args) {
     if(this.scoped) fail('BROWSER_SESSION_EXISTS','End the existing browser session before starting another.');
-    this.scoped=true; this.interrupted=null; const generation=++this.generation;
+    this.scoped=true; this.interrupted=null; this.handoff=null; this.contextClosed=false; const generation=++this.generation;
     this.channel=args.browser??'chrome'; this.headless=args.headless??false;
-    let launched;
+    this.persistentProfile=args.profile??null;
+    let launched=null, persistentCtx=null;
     try {
-      launched=await chromium.launch({channel:this.channel==='edge'?'msedge':'chrome',headless:this.headless,chromiumSandbox:true,handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,timeout:15000});
-      if(generation!==this.generation) {await launched.close(); fail('CANCELLED','Browser launch was cancelled.');}
-      this.browser=launched;
-      this.context=await launched.newContext({acceptDownloads:false,viewport:{width:1280,height:800},deviceScaleFactor:1,serviceWorkers:'block'});
+      const channelName=this.channel==='edge'?'msedge':'chrome';
+      const commonOpts={channel:channelName,headless:this.headless,chromiumSandbox:true,handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,timeout:15000};
+      if(this.persistentProfile) {
+        const profileDir=this.#profileDir(this.persistentProfile);
+        mkdirSync(profileDir, {recursive:true});
+        persistentCtx=await chromium.launchPersistentContext(profileDir,{...commonOpts,acceptDownloads:false,viewport:{width:1280,height:800},deviceScaleFactor:1,serviceWorkers:'block'});
+        if(generation!==this.generation) {await persistentCtx.close(); fail('CANCELLED','Browser launch was cancelled.');}
+        this.context=persistentCtx;
+        this.browser=persistentCtx.browser();
+        const existing=persistentCtx.pages();
+        this.starterPage=existing[0]??null;
+        for(const extra of existing.slice(1)) void extra.close({runBeforeUnload:false}).catch(()=>{});
+      } else {
+        launched=await chromium.launch(commonOpts);
+        if(generation!==this.generation) {await launched.close(); fail('CANCELLED','Browser launch was cancelled.');}
+        this.browser=launched;
+        this.context=await launched.newContext({acceptDownloads:false,viewport:{width:1280,height:800},deviceScaleFactor:1,serviceWorkers:'block'});
+        this.starterPage=null;
+      }
       this.context.setDefaultTimeout(5000); this.context.setDefaultNavigationTimeout(5000);
-      this.context.on('page',page=>this.#register(page,false));
-      launched.on('disconnected',()=>{this.interrupted??='BROWSER_DISCONNECTED'; for(const tab of this.tabs.values()) this.#invalidate(tab);});
+      this.context.on('page',page=>{if(page!==this.starterPage) this.#register(page,false);});
+      this.context.on('close',()=>{this.contextClosed=true;});
+      this.browser?.on('disconnected',()=>{this.interrupted??='BROWSER_DISCONNECTED'; for(const tab of this.tabs.values()) this.#invalidate(tab);});
       this.sessionId='browser-'+randomUUID();
       return this.#summary();
-    } catch(error) {if(launched) await launched.close().catch(()=>{}); this.browser=null;this.context=null; throw error;}
+    } catch(error) {
+      if(persistentCtx) await persistentCtx.close().catch(()=>{});
+      if(launched) await launched.close().catch(()=>{});
+      this.browser=null;this.context=null;this.scoped=false;this.sessionId=null;this.persistentProfile=null;this.starterPage=null;
+      throw error;
+    }
+  }
+  async #handoff(args) {
+    this.#connected();
+    const openTabs=[...this.tabs.values()].filter(tab=>!tab.page.isClosed());
+    const focusTab=[...openTabs].reverse().find(t=>t.managed)??openTabs.at(-1);
+    if(focusTab && !this.headless) await focusTab.page.bringToFront().catch(()=>{});
+    await this.bridge.request('system',{operation:'control_end'}).catch(()=>{});
+    this.handoff={active:true,reason:args.reason??'User handoff active'};
+    return {...this.#summary(),instructions:'User handoff active. Wait for the user to finish, then call browser_session resume_handoff.'};
+  }
+  async #resumeHandoff() {
+    this.#connected();
+    this.handoff=null;
+    for(const tab of this.tabs.values()) this.#invalidate(tab);
+    const tabs=await Promise.all([...this.tabs.values()].filter(tab=>!tab.page.isClosed()).map(tab=>this.#tabInfo(tab)));
+    return {...this.#summary(),handoff_resumed:true,tabs};
   }
   #register(page,managed) {
     const existing=this.pages.get(page); if(existing) {if(managed) existing.managed=true;return existing;}
     for(const [id,tab] of this.tabs) if(this.tabs.size>=64&&tab.page.isClosed()) this.tabs.delete(id);
     if([...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length>=16) {void page.close({runBeforeUnload:false}).catch(()=>{});return null;}
-    const entry={id:'tab-'+randomUUID(),page,managed,refs:new Map(),frames:new Map(),frameIds:new WeakMap(),captures:new Map(),revision:0,dialog:null,pending:null,uncertain:null,freshRead:false,stamp:null};
+    const entry={id:'tab-'+randomUUID(),page,managed,refs:new Map(),frames:new Map(),frameIds:new WeakMap(),captures:new Map(),revision:0,dialog:null,pending:null,uncertain:null,freshRead:false,stamp:null,lastSnapshot:null};
     this.pages.set(page,entry); this.tabs.set(entry.id,entry);
     page.on('framenavigated',()=>this.#invalidate(entry)); page.on('close',()=>this.#invalidate(entry)); page.on('crash',()=>{this.#invalidate(entry);entry.uncertain={code:'TAB_CRASHED'};});
     page.on('dialog',dialog=>{entry.dialog=dialog;entry.dialogWake?.();});
@@ -131,7 +212,7 @@ export class BrowserController {
     return entry;
   }
   #invalidate(entry) {
-    entry.revision++; entry.freshRead=false;
+    entry.revision++; entry.freshRead=false; entry.lastSnapshot=null;
     for(const ref of entry.refs.values()) void ref.handle.dispose().catch(()=>{});
     entry.refs.clear();entry.captures.clear();
     const stamp=entry.stamp;entry.stamp=null;
@@ -139,13 +220,16 @@ export class BrowserController {
   }
   async #tabInfo(entry) {return {tab_id:entry.id,url:bounded(entry.page.url(),4000),title:entry.dialog?'':bounded(await entry.page.title().catch(()=>''),300),managed:entry.managed,closed:entry.page.isClosed(),dialog:!!entry.dialog,uncertain_delivery:!!entry.uncertain};}
   #ready(entry) {if(entry.dialog) fail('BROWSER_DIALOG_OPEN','Resolve this tab dialog first.');if(entry.uncertain) fail('RECONCILIATION_REQUIRED','Read this tab and reconcile its uncertain delivery first.');}
-  async #tabs(args,entry,timeout,dispatched) {
+  async #tabs(args,entry,timeout,dispatched,onNewPage) {
     const operation=args.operation;
     if(operation==='new') {
       if([...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length>=16) fail('TAB_LIMIT','Close an owned tab before opening another.');
       const url=browserUrl(args.url??'about:blank');
       dispatched();
-      const page=await this.context.newPage(); entry=this.#register(page,true);
+      let page=null;
+      if(this.starterPage && !this.starterPage.isClosed()) { page=this.starterPage; this.starterPage=null; }
+      else page=await this.context.newPage();
+      onNewPage?.(page); entry=this.#register(page,true);
       if(!entry) fail('TAB_LIMIT','This new tab was closed because the owned-tab limit was reached.');
       try {await page.goto(url,{waitUntil:'domcontentloaded',timeout});} catch {entry.uncertain={code:'NAVIGATION_FAILED'};return {...await this.#tabInfo(entry),verification:'failed',delivery:'sent',reason:'Navigation was not confirmed. Inspect this exact tab; it was not recreated.'};}
       return {...await this.#tabInfo(entry),verification:'passed',delivery:'sent'};
@@ -192,42 +276,138 @@ export class BrowserController {
     if(!info) {await handle.dispose();fail('STALE_BROWSER_REF','Target detached.');}
     return {handle,info,owned:true};
   }
-  #ref(entry,handle,info) {const ref='bref-'+randomUUID();entry.refs.set(ref,{handle,identity:identity(info),expires:Date.now()+60000,revision:entry.revision});return ref;}
+  #ref(entry,handle,info) {const ref='b'+(++this.refSeq);entry.refs.set(ref,{handle,identity:identity(info),expires:Date.now()+60000,revision:entry.revision});return ref;}
   async #read(entry,args) {
     for(const [ref,saved] of entry.refs) if(saved.expires<Date.now()) {entry.refs.delete(ref);void saved.handle.dispose().catch(()=>{});}
     if(entry.refs.size>=400) {for(const ref of entry.refs.values()) void ref.handle.dispose().catch(()=>{});entry.refs.clear();}
-    const root=await this.#resolve(entry,args,{root:true});const limit=args.limit??50,max=args.max_chars??16000;
+    const root=await this.#resolve(entry,args,{root:true});const limit=args.limit??50,max=args.max_chars??16000,includeText=args.include_text??true;
     try {
       if(root.info.password) fail('PASSWORD_FIELD','Password content is excluded.');
-      const textData=await root.handle.evaluate((element,max)=>{const text=element.innerText??element.textContent??'';const scroll=element.tagName==='BODY'?element.ownerDocument.scrollingElement:element;return {text:text.slice(0,max+1),length:text.length,scroll:{x:scroll.scrollLeft,y:scroll.scrollTop,width:scroll.clientWidth,height:scroll.clientHeight,content_width:scroll.scrollWidth,content_height:scroll.scrollHeight}};},max);
-      const result={...await this.#tabInfo(entry),source:'dom',text:bounded(textData.text,max),text_complete:textData.length<=max,scroll:textData.scroll,frames:this.#frameList(entry),frames_complete:entry.page.frames().length<=80,scope:'selected DOM root/frame; bounds are relative to that frame viewport; other frames are listed, not flattened',image_count:0};
+      const textData=await root.handle.evaluate((element,{max,includeText})=>{
+        const scroll=element.tagName==='BODY'?element.ownerDocument.scrollingElement:element;
+        const scrollBox={x:scroll.scrollLeft,y:scroll.scrollTop,width:scroll.clientWidth,height:scroll.clientHeight,content_width:scroll.scrollWidth,content_height:scroll.scrollHeight};
+        if(!includeText) return {text:'',length:0,scroll:scrollBox};
+        const text=element.innerText??element.textContent??'';
+        return {text:text.slice(0,max+1),length:text.length,scroll:scrollBox};
+      },{max,includeText});
+      const result={...await this.#tabInfo(entry),source:'dom',text:includeText?bounded(textData.text,max):'',text_complete:includeText?textData.length<=max:false,...(includeText?{}:{text_omitted:true}),scroll:textData.scroll,frames:this.#frameList(entry),frames_complete:entry.page.frames().length<=80,scope:'selected DOM root/frame; bounds are relative to that frame viewport; other frames are listed, not flattened',image_count:0};
       if(args.operation==='snapshot') {
         const selector='a[href],button,input:not([type=hidden]),textarea,select,[role],[contenteditable=true],summary';
-        const handles=await root.handle.evaluateHandle((element,selector)=>{
-          const found=[];const walk=root=>{if(root.shadowRoot)walk(root.shadowRoot);for(const child of root.querySelectorAll('*')) {if(child.matches(selector)) found.push(child);if(found.length>300)return;if(child.shadowRoot)walk(child.shadowRoot);if(found.length>300)return;}};
-          walk(element);return found.slice(0,301);
-        },selector);
-        const candidates=[...(await handles.getProperties()).values()].map(handle=>handle.asElement()).filter(Boolean);await handles.dispose();
-        const items=[];let scanned=0;
-        for(const handle of candidates) {
-          if(items.length>=limit||scanned++>=300) {await handle.dispose();continue;}
-          const info=await handle.evaluate(elementInfo).catch(()=>null);
-          if(!info||!info.visible) {await handle.dispose();continue;}
-          const {href,tag,type,...publicInfo}=info;items.push({ref:this.#ref(entry,handle,info),...publicInfo});
+        const batch=await root.handle.evaluateHandle((rootEl,{selector,limit})=>{
+          const items=[]; let scanned=0, overflow=false;
+          const readInfo=el=>{
+            if(!el.isConnected) return null;
+            const tag=el.tagName.toLowerCase(), type=(el.getAttribute('type')??'').toLowerCase();
+            const role=el.getAttribute('role')||({button:'button',a:'link',textarea:'textbox',select:'combobox',summary:'button',input:type==='checkbox'?'checkbox':type==='radio'?'radio':['button','submit','reset'].includes(type)?'button':'textbox'}[tag]??tag);
+            const labelled=(el.getAttribute('aria-labelledby')??'').split(/\s+/).map(id=>el.ownerDocument.getElementById(id)?.textContent??'').join(' ').trim();
+            const name=el.getAttribute('aria-label')||labelled||[...(el.labels??[])].map(label=>label.innerText).join(' ').trim()||(['button','a','summary'].includes(tag)?el.innerText:'')||el.getAttribute('placeholder')||el.getAttribute('title')||'';
+            const password=tag==='input'&&type==='password';
+            const value=password?undefined:(tag==='input'||tag==='textarea'||tag==='select')?String(el.value??'').slice(0,500):undefined;
+            const box=el.getBoundingClientRect(); const style=getComputedStyle(el);
+            if(!(box.width>0&&box.height>0&&style.visibility!=='hidden'&&style.display!=='none')) return null;
+            return {tag,type,role,name:name.slice(0,500),password,value,checked:typeof el.checked==='boolean'?el.checked:undefined,disabled:!!el.disabled||el.getAttribute('aria-disabled')==='true',visible:true,href:el.closest('a[href]')?.href??null,bounds:{x:Math.round(box.x),y:Math.round(box.y),width:Math.round(box.width),height:Math.round(box.height)}};
+          };
+          const walk=node=>{
+            if(node.shadowRoot) walk(node.shadowRoot);
+            for(const child of node.querySelectorAll('*')) {
+              if(overflow) return;
+              if(child.matches(selector)) {
+                if(scanned>=300) {overflow=true; return;}
+                scanned++;
+                const info=readInfo(child);
+                if(info) {
+                  if(items.length>=limit) {overflow=true; return;}
+                  items.push({el:child,info});
+                }
+              }
+              if(child.shadowRoot) walk(child.shadowRoot);
+            }
+          };
+          walk(rootEl);
+          return {elements:items.map(item=>item.el),meta:{infos:items.map(item=>item.info),complete:!overflow}};
+        },{selector,limit});
+        const metaHandle=await batch.getProperty('meta');
+        const {infos,complete}=await metaHandle.jsonValue();
+        await metaHandle.dispose();
+        const elementsHandle=await batch.getProperty('elements');
+        const props=await elementsHandle.getProperties();
+        await elementsHandle.dispose();
+        await batch.dispose();
+        const items=[];
+        const snapMap=new Map();
+        for(let i=0;i<infos.length;i++) {
+          const prop=props.get(String(i));
+          const handle=prop?.asElement()??null;
+          if(!handle) {await prop?.dispose().catch(()=>{}); continue;}
+          const info=infos[i];
+          const item={ref:this.#ref(entry,handle,info),role:info.role,name:info.name};
+          if(info.value!==undefined) item.value=info.value;
+          if(info.checked!==undefined) item.checked=info.checked;
+          if(info.disabled) item.disabled=true;
+          if(info.password) item.password=true;
+          item.bounds=info.bounds;
+          items.push(item);
+          const key=item.role+'|'+item.name+'|'+item.bounds.x+','+item.bounds.y;
+          if(!snapMap.has(key)) snapMap.set(key, item);
         }
-        result.items=items;result.controls_complete=candidates.length<=scanned&&items.length<limit;
+        for(const [k,prop] of props) {
+          const idx=Number(k);
+          if(!Number.isInteger(idx)||idx<0||idx>=infos.length) await prop.dispose().catch(()=>{});
+        }
+        result.items=items; result.controls_complete=complete;
+        entry.lastSnapshot={url:entry.page.url(),items:snapMap};
       }
       entry.freshRead=true;return result;
     } finally {if(root.owned) await root.handle.dispose();}
   }
+  async #observeAfter(entry, args) {
+    const mode=args.observe_after;
+    if(mode!=='diff' && mode!=='snapshot') return {};
+    const settle=args.settle_ms??100;
+    if(settle>0) await sleep(settle);
+    if(entry.page.isClosed() || entry.dialog) return {};
+    try {
+      browserUrl(entry.page.url());
+      const prev=entry.lastSnapshot;
+      const snap=await this.#read(entry,{operation:'snapshot',limit:50,include_text:false});
+      if(mode==='diff' && prev && prev.url===snap.url) {
+        const added=[], changed=[], seenKeys=new Set();
+        for(const item of snap.items) {
+          const key=item.role+'|'+item.name+'|'+item.bounds.x+','+item.bounds.y;
+          seenKeys.add(key);
+          const old=prev.items.get(key);
+          if(!old) added.push(item);
+          else if(old.value!==item.value || old.checked!==item.checked || old.disabled!==item.disabled) changed.push(item);
+        }
+        let removedCount=0;
+        for(const oldKey of prev.items.keys()) if(!seenKeys.has(oldKey)) removedCount++;
+        return {observation:{mode:'diff',url:snap.url,title:snap.title,scroll:snap.scroll,added,changed,removed_count:removedCount,unchanged_count:snap.items.length-added.length-changed.length,controls_complete:snap.controls_complete}};
+      }
+      return {observation:{mode:'full',url:snap.url,title:snap.title,scroll:snap.scroll,items:snap.items,controls_complete:snap.controls_complete}};
+    } catch(err) {
+      return {observation_error:err.code??'OBSERVATION_FAILED'};
+    }
+  }
   async #act(entry,args,timeout,dispatched) {
-    if(['click_point','mouse_move'].includes(args.action)) {
+    if(['click_point','mouse_move','click_mark'].includes(args.action)) {
       const capture=entry.captures.get(args.capture_id);entry.captures.delete(args.capture_id);
       if(!capture||capture.expires<Date.now()||capture.revision!==entry.revision) fail('STALE_CAPTURE','Point token is expired, consumed or belongs to another tab.');
       const state=await this.#stamp(entry);
-      if(JSON.stringify(state)!==JSON.stringify(capture.state)||args.x>=capture.width||args.y>=capture.height) fail('STALE_CAPTURE','Page/viewport/scroll changed after capture or coordinates are outside this image.');
-      dispatched();if(args.action==='click_point') await entry.page.mouse.click(args.x,args.y);else await entry.page.mouse.move(args.x,args.y);
-      entry.captures.clear();return {tab_id:entry.id,delivery:'sent',verification:'not_requested'};
+      if(JSON.stringify(state)!==JSON.stringify(capture.state)) fail('STALE_CAPTURE','Page/viewport/scroll changed after capture.');
+      let x=args.x, y=args.y;
+      if(args.action==='click_mark') {
+        const mark=capture.marks?.get(args.mark);
+        if(!mark) fail('INVALID_ARGUMENT',`Mark ${args.mark} does not exist in this capture.`);
+        x=mark.x; y=mark.y;
+      } else if(x>=capture.width||y>=capture.height) {
+        fail('STALE_CAPTURE','Coordinates are outside this image.');
+      }
+      dispatched();
+      if(args.action==='mouse_move') await entry.page.mouse.move(x,y);
+      else await entry.page.mouse.click(x,y);
+      entry.captures.clear();
+      const obs=await this.#observeAfter(entry,args);
+      return {tab_id:entry.id,delivery:'sent',verification:'not_requested',...obs};
     }
     const target=args.ref||args.locator?await this.#resolve(entry,args):null;
     try {
@@ -254,7 +434,7 @@ export class BrowserController {
             case 'hover':await target.handle.hover(opts);break;
             case 'fill':await target.handle.fill(args.text,opts);break;
             case 'type':await target.handle.type(args.text,opts);break;
-            case 'press':await target.handle.press(args.key.replace(/^Ctrl\+/,'Control+').replace(/^Esc$/,'Escape'),opts);break;
+            case 'press':await target.handle.press(args.key.split('+').map(part=>({Ctrl:'Control',Esc:'Escape'}[part]??part)).join('+'),opts);break;
             case 'check':await target.handle.setChecked(true,opts);break;
             case 'uncheck':await target.handle.setChecked(false,opts);break;
             case 'select_option':await target.handle.selectOption({label:args.option},opts);break;
@@ -271,7 +451,8 @@ export class BrowserController {
         await Promise.race([action,dialogOpened]);entry.dialogWake=null;
         if(entry.dialog) {entry.pending=action;return {tab_id:entry.id,delivery:'sent',verification:'pending_dialog',dialog:{type:entry.dialog.type(),message:bounded(entry.dialog.message(),2000)}};}
       }
-      return {tab_id:entry.id,delivery:'sent',verification:'not_requested',note:'Read the target state or use browser_wait to verify the requested effect.'};
+      const obs=await this.#observeAfter(entry,args);
+      return {tab_id:entry.id,delivery:'sent',verification:'not_requested',note:'Read the target state or use browser_wait to verify the requested effect.',...obs};
     } finally {if(target?.owned) await target.handle.dispose().catch(()=>{});}
   }
   async #wait(entry,args,timeout) {
@@ -297,16 +478,51 @@ export class BrowserController {
     if(!entry.stamp) entry.stamp=await entry.page.evaluateHandle(()=>{const state={revision:0,observer:null};state.observer=new MutationObserver(()=>state.revision++);state.observer.observe(document,{subtree:true,attributes:true,childList:true,characterData:true});return state;});
     return entry.stamp.evaluate(state=>({revision:state.revision,x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,url:location.href}));
   }
-  async #capture(entry,timeout) {
+  async #capture(entry,args,timeout) {
+    const maxMarks=args.max_marks??40;
+    const rawMarks=args.annotate ? await entry.page.evaluate(maxMarks=>{
+      const selector='a[href],button,input:not([type=hidden]),textarea,select,[role],[contenteditable=true],summary';
+      const out=[], seen=[];
+      const vw=window.innerWidth, vh=window.innerHeight;
+      const walk=node=>{
+        if(out.length>=maxMarks) return;
+        if(node.shadowRoot) walk(node.shadowRoot);
+        for(const el of node.querySelectorAll('*')) {
+          if(out.length>=maxMarks) return;
+          if(el.matches(selector)) {
+            const box=el.getBoundingClientRect(), style=getComputedStyle(el);
+            if(box.width>=6&&box.height>=6&&style.visibility!=='hidden'&&style.display!=='none') {
+              const x0=Math.max(0,box.left), y0=Math.max(0,box.top), x1=Math.min(vw,box.right), y1=Math.min(vh,box.bottom);
+              if(x1-x0>=6&&y1-y0>=6) {
+                const cx=Math.round((x0+x1)/2), cy=Math.round((y0+y1)/2);
+                if(!seen.some(p=>Math.abs(p.x-cx)<=5&&Math.abs(p.y-cy)<=5)) {
+                  seen.push({x:cx,y:cy});
+                  const tag=el.tagName.toLowerCase(), type=(el.getAttribute('type')??'').toLowerCase();
+                  const role=el.getAttribute('role')||({button:'button',a:'link',textarea:'textbox',select:'combobox',summary:'button',input:type==='checkbox'?'checkbox':type==='radio'?'radio':['button','submit','reset'].includes(type)?'button':'textbox'}[tag]??tag);
+                  const labelled=(el.getAttribute('aria-labelledby')??'').split(/\s+/).map(id=>document.getElementById(id)?.textContent??'').join(' ').trim();
+                  const name=(el.getAttribute('aria-label')||labelled||[...(el.labels??[])].map(l=>l.innerText).join(' ').trim()||(['button','a','summary'].includes(tag)?el.innerText:'')||el.getAttribute('placeholder')||el.getAttribute('title')||'').slice(0,120);
+                  out.push({mark:out.length+1,role,name,cx,cy,bounds:{x:Math.round(x0),y:Math.round(y0),width:Math.round(x1-x0),height:Math.round(y1-y0)}});
+                }
+              }
+            }
+          }
+          if(el.shadowRoot) walk(el.shadowRoot);
+        }
+      };
+      walk(document.body||document.documentElement);
+      return out;
+    }, maxMarks) : null;
     const state=await this.#stamp(entry),revision=entry.revision;
     // Keep the DOM intact: default caret-hiding/masking injects temporary styles and breaks
     // mutation validation. Browser password inputs render their normal masked characters.
-    const bytes=await entry.page.screenshot({type:'png',fullPage:false,caret:'initial',timeout});
+    let bytes=await entry.page.screenshot({type:'png',fullPage:false,caret:'initial',timeout});
     if(entry.revision!==revision||JSON.stringify(state)!==JSON.stringify(await this.#stamp(entry))) fail('CAPTURE_CHANGED','The page changed during capture. No point token was issued.');
     const width=bytes.readUInt32BE(16),height=bytes.readUInt32BE(20);if(width>1600||height>1600) fail('CAPTURE_LIMIT','Viewport exceeded the browser image budget.');
-    const capture_id='bcap-'+randomUUID();entry.captures.clear();entry.captures.set(capture_id,{state,revision,width,height,expires:Date.now()+10000});
+    if(rawMarks&&rawMarks.length>0) bytes=annotatePng(bytes,rawMarks);
+    const capture_id='bcap-'+randomUUID();entry.captures.clear();
+    entry.captures.set(capture_id,{state,revision,width,height,expires:Date.now()+10000,marks:rawMarks?new Map(rawMarks.map(m=>[m.mark,{x:m.cx,y:m.cy,role:m.role,name:m.name}])):null});
     entry.freshRead=true;
-    return {tab_id:entry.id,capture_id,width,height,image:bytes.toString('base64'),coordinate_system:'tab viewport CSS pixels; single use; 10s',memory_only:true};
+    return {tab_id:entry.id,capture_id,width,height,...(rawMarks?{marks:rawMarks.map(m=>({mark:m.mark,role:m.role,name:m.name}))}:{}),image:bytes.toString('base64'),coordinate_system:'tab viewport CSS pixels; single use; 10s',memory_only:true};
   }
   async #dialog(entry,args,dispatched) {
     if(!entry.dialog) {if(args.operation==='inspect') return {tab_id:entry.id,dialog:null};fail('DIALOG_NOT_FOUND','This tab has no pending JavaScript dialog.');}
@@ -314,23 +530,34 @@ export class BrowserController {
     if(args.operation==='inspect') return {tab_id:entry.id,dialog:{type:dialog.type(),message:bounded(dialog.message(),2000),default_value:bounded(dialog.defaultValue(),1000)}};
     if(args.prompt_text!==undefined&&dialog.type()!=='prompt') fail('INVALID_ARGUMENT','prompt_text requires a prompt dialog.');
     dispatched();
-    if(args.operation==='accept') await dialog.accept(args.prompt_text);else await dialog.dismiss();
-    entry.dialog=null;if(entry.pending) {const pending=entry.pending;entry.pending=null;await pending;}
+    entry.dialog=null;
+    let dialogWake; const dialogOpened=new Promise(resolve=>{dialogWake=resolve;}); entry.dialogWake=dialogWake;
+    try {
+      if(args.operation==='accept') await dialog.accept(args.prompt_text);else await dialog.dismiss();
+      if(entry.pending) {
+        const pending=entry.pending; entry.pending=null;
+        try { await Promise.race([pending, dialogOpened]); }
+        catch(err) { if(err?.name!=='TimeoutError') throw err; }
+      }
+    } finally { entry.dialogWake=null; }
+    if(entry.dialog) return {tab_id:entry.id,handled:true,action:args.operation,delivery:'sent',verification:'pending_dialog',dialog:{type:entry.dialog.type(),message:bounded(entry.dialog.message(),2000)}};
     return {tab_id:entry.id,handled:true,action:args.operation,delivery:'sent'};
   }
   stop(code='USER_STOPPED') {this.interrupted=code;this.generation++;return this.#dispose(false);}
   async #dispose(endScope) {
-    if(this.closing) {await this.closing;if(endScope){this.tabs.clear();this.pages=new WeakMap();this.scoped=false;this.sessionId=null;this.interrupted=null;}return;}
-    const browser=this.browser,context=this.context;this.browser=null;this.context=null;
+    if(this.closing) {await this.closing;if(endScope){this.tabs.clear();this.pages=new WeakMap();this.scoped=false;this.sessionId=null;this.interrupted=null;this.persistentProfile=null;this.starterPage=null;this.handoff=null;}return;}
+    const browser=this.browser,context=this.context,isPersistent=!!this.persistentProfile;
+    this.browser=null;this.context=null;this.starterPage=null;
     for(const entry of this.tabs.values()) this.#invalidate(entry);
     this.closing=(async()=>{
-      if(browser) {
-        try {await browser.close();}
-        catch {if(browser.isConnected()){this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','Owned browser closure was not confirmed. The browser scope remains locked.');}}
-        if(browser.isConnected()){this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','Owned browser is still connected; scope was not released.');}
+      const target=isPersistent?context:browser;
+      if(target) {
+        try {await target.close();}
+        catch {if(browser?.isConnected()){this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','Owned browser closure was not confirmed. The browser scope remains locked.');}}
+        if(browser?.isConnected()){this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','Owned browser is still connected; scope was not released.');}
       }
     })();
-    try {await this.closing;} finally {this.closing=null;if(endScope&&!this.browser?.isConnected()){this.tabs.clear();this.pages=new WeakMap();this.scoped=false;this.sessionId=null;this.interrupted=null;}}
+    try {await this.closing;} finally {this.closing=null;if(endScope&&!this.browser?.isConnected()){this.tabs.clear();this.pages=new WeakMap();this.scoped=false;this.sessionId=null;this.interrupted=null;this.persistentProfile=null;this.handoff=null;}}
   }
   async close() {this.generation++;await this.#dispose(true);if(!this.bridge.closed) await this.bridge.request('system',{operation:'control_end'}).catch(()=>{});}
 }

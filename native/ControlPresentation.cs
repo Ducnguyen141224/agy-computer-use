@@ -30,12 +30,22 @@ internal static class ControlPresentation
     internal static IntPtr HighlightWindowHandle;
     internal static bool OwnsWindow(IntPtr window) => window != IntPtr.Zero && (window == WindowHandle || window == PointerWindowHandle || window == HighlightWindowHandle);
     internal static bool Paused => Stopped.WaitOne(0);
-    internal static bool Active => !Paused && (Volatile.Read(ref taskActive) != 0 || Volatile.Read(ref owners) > 0 || Environment.TickCount64 < Interlocked.Read(ref until));
+    private const int IdleHideMs = 120;
+    internal static bool Active => !Paused && (Volatile.Read(ref owners) > 0 || Environment.TickCount64 < Interlocked.Read(ref until));
+    internal static bool Armed => !Paused && (Volatile.Read(ref taskActive) != 0 || Active);
     internal static object StartTask()
     {
-        using var activity = Begin();
+        Check();
+        PresentationDispatcher.Run(() => { EnsureHook(); return true; });
         Interlocked.Exchange(ref taskActive, 1);
         return Status();
+    }
+    private static void EnsureHook()
+    {
+        Check();
+        if (hook != IntPtr.Zero) return;
+        hook = SetWindowsHookEx(13, Callback, GetModuleHandle(null), 0);
+        if (hook == IntPtr.Zero) throw new DesktopError("STOP_HOOK_UNAVAILABLE", "Cannot register Escape stop. No new action was started.");
     }
     internal static object EndTask()
     {
@@ -51,16 +61,12 @@ internal static class ControlPresentation
         PresentationDispatcher.Run(() =>
         {
             Check();
-            if (hook == IntPtr.Zero)
-            {
-                hook = SetWindowsHookEx(13, Callback, GetModuleHandle(null), 0);
-                if (hook == IntPtr.Zero) throw new DesktopError("STOP_HOOK_UNAVAILABLE", "Cannot register Escape stop. No new action was started.");
-            }
+            EnsureHook();
             form ??= new ActivityForm();
             pointer ??= new PointerPresenter();
             highlight ??= new HighlightPresenter();
             Interlocked.Increment(ref owners);
-            Interlocked.Exchange(ref until, Environment.TickCount64 + 1800);
+            Interlocked.Exchange(ref until, 0);
             try { form.Wake(); pointer.Wake(); visible = true; WindowHandle = form.Handle; PointerWindowHandle = pointer.Handle; HighlightWindowHandle = highlight.Handle; }
             catch { Interlocked.Decrement(ref owners); form.Rest(); pointer.Rest(); highlight.Rest(); throw; }
             CursorOverlay.Suspend(false);
@@ -71,14 +77,14 @@ internal static class ControlPresentation
     private sealed class Activity : IDisposable
     {
         private bool disposed;
-        public void Dispose() { if (disposed) return; disposed = true; Interlocked.Decrement(ref owners); if (!Paused) Interlocked.Exchange(ref until, Environment.TickCount64 + 1800); }
+        public void Dispose() { if (disposed) return; disposed = true; Interlocked.Decrement(ref owners); if (!Paused) Interlocked.Exchange(ref until, Environment.TickCount64 + IdleHideMs); }
     }
     internal static void Check()
     {
         if (Paused) throw new DesktopError("USER_STOPPED", "Control was stopped with Escape. Inspect the UI; resume only after a new explicit user instruction.", new { delivery = "unknown", resume = "desktop_system control_resume" });
     }
     internal static void Delay(int milliseconds) { if (Stopped.WaitOne(Math.Max(0, milliseconds))) Check(); }
-    internal static object Status() => new { paused = Paused, active = Active, task_active = Volatile.Read(ref taskActive) != 0 && !Paused, rendered = visible && WindowHandle != IntPtr.Zero, border = PresentationTheme.EdgeHex, escape_to_stop = true, idle_hide_ms = Volatile.Read(ref taskActive) != 0 ? (int?)null : 1800, scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
+    internal static object Status() => new { paused = Paused, active = Active, armed = Armed, task_active = Volatile.Read(ref taskActive) != 0 && !Paused, rendered = visible && WindowHandle != IntPtr.Zero, border = PresentationTheme.EdgeHex, escape_to_stop = true, idle_hide_ms = IdleHideMs, visibility_policy = "input operations only; reads/model/shell waits do not show overlays", scope = "current interactive user; RAM only", resume_requires = "new explicit user instruction", presentation = form == null ? null : PresentationDispatcher.Run<object>(() => new { border_paints = form.Paints, pointer = pointer?.Metrics() }) };
     internal static object Resume() { Interlocked.Exchange(ref stopNotified, 0); Stopped.Reset(); return Status(); }
     internal static void PreserveStop() => Stopped.Set();
     internal static void Stop()
@@ -121,6 +127,7 @@ internal static class ControlPresentation
     }
     internal static void Close()
     {
+        CursorOverlay.Suspend(true);
         Interlocked.Exchange(ref taskActive, 0);
         Interlocked.Exchange(ref until, 0);
         if (form == null && hook == IntPtr.Zero) return;
@@ -132,7 +139,7 @@ internal static class ControlPresentation
         if (code >= 0)
         {
             var key = Marshal.PtrToStructure<KeyData>(data);
-            if (key.Key == 0x1B && key.ExtraInfo != Native.InputTag && (message == new IntPtr(0x100) || message == new IntPtr(0x104)) && Active)
+            if (key.Key == 0x1B && key.ExtraInfo != Native.InputTag && (message == new IntPtr(0x100) || message == new IntPtr(0x104)) && Armed)
             {
                 Stop(); return new IntPtr(1);
             }
@@ -161,7 +168,7 @@ internal static class ControlPresentation
             AutoScaleMode = AutoScaleMode.None; TopMost = true;
             clock.Tick += (_, _) =>
             {
-                if (!Active) { Rest(); pointer?.Rest(); highlight?.Rest(); visible = false; if (Paused) CursorOverlay.Suspend(true); return; }
+                if (!Active) { Rest(); pointer?.Rest(); highlight?.Rest(); visible = false; CursorOverlay.Suspend(true); return; }
                 if (Bounds != SystemInformation.VirtualScreen) { Bounds = SystemInformation.VirtualScreen; DrawArtwork(); }
                 if (!Visible) { Wake(); visible = true; }
             };

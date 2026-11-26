@@ -15,7 +15,7 @@ let probe,lines,checks=0;
 const check=(value,message)=>{assert.ok(value,message);checks++;process.stdout.write(`PASS ${message}\n`);};
 const call=async(name,args,allowError=false)=>{const reply=await controller.request(name,args);if(!allowError)assert.equal(reply.ok,true,JSON.stringify(reply));return reply;};
 try {
-  await call('browser_session',{operation:'start',browser:'chrome',headless:false});
+  await call('browser_session',{operation:'start', connection:'isolated',browser:'chrome',headless:false});
   const label='ESC-'+randomUUID();
   const tab=(await call('browser_tabs',{operation:'new',url:fixture.url+'/main?tab='+label})).data.tab_id;
   // Independent native observation is constrained to the nonce-titled browser created above.

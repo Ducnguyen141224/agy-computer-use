@@ -1,20 +1,22 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { NativeBridge } from '../src/native-bridge.mjs';
+import { DesktopController } from '../src/desktop-controller.mjs';
+import { toolResult } from '../src/tools.mjs';
+import { randomUUID } from 'node:crypto';
 import { pixel, solidPng } from '../tests/png.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+process.env.AGY_DESKTOP_TEST_SCOPE=randomUUID().replaceAll('-','');
 execFileSync('dotnet', ['build', 'tests/fixture/DesktopFixture.csproj', '-c', 'Release', '--nologo'], { cwd: root, stdio: 'pipe', windowsHide: true });
 const title = `AGY presentation ${Date.now()}`;
 const fixture = spawn(fileURLToPath(new URL('../tests/fixture/bin/Release/net10.0-windows/DesktopFixture.exe', import.meta.url)), [title], { stdio: 'ignore' });
-const client = new Client({ name: 'presentation-smoke', version: '0.2.0' });
-const transport = new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url))], stderr: 'pipe' });
+const bridge=new NativeBridge(),controller=new DesktopController(bridge);
+const client={async callTool({name,arguments:args}){return toolResult(await controller.request(name,args));},async close(){controller.close();}};
 let checks = 0;
 const check = (value, description) => { assert.ok(value, description); checks++; process.stdout.write(`PASS ${description}\n`); };
 try {
-  await client.connect(transport);
   const call = async (name, args) => {
     const reply = await client.callTool({ name, arguments: args });
     const data = JSON.parse(reply.content[0].text);
@@ -48,6 +50,9 @@ try {
   await call('desktop_act', { action: 'focus_window', window_id });
   const original = await call('desktop_capture', { window_id, region, max_dimension: 200 });
   const basePixel = pixel(original.image, 30, 20);
+  // Keep the render surface alive only for these explicit pixel/theme assertions;
+  // activity-smoke covers the automatic input-only lifetime independently.
+  const renderLease=await bridge.request('presentation',{operation:'begin'});assert.ok(renderLease.ok);
   await call('desktop_system', { operation: 'cursor_config', agent: 'tester', cursor: { enabled: true, style: 'dot', fill: '#FF0000', accent: '#FF0000', labels: false, size: 28, travel_ms: 0 } });
   await call('desktop_act', { action: 'mouse_move', window_id, capture_id: original.capture_id, x: 30, y: 20 });
   const { frame: seen, observed: dot } = await waitFrame(window_id, region, [255, 0, 0]);
@@ -90,5 +95,6 @@ try {
   await call('desktop_system', { operation: 'cursor_remove', agent: 'tester' });
   const { frame: cleared } = await waitFrame(window_id, region, basePixel);
   check(basePixel.every((value, index) => Math.abs(value - pixel(cleared.image, 30, 20)[index]) < 3), 'removing all profiles removes their actual pixels from the screen');
+  await bridge.request('presentation',{operation:'end',token:renderLease.data.token});
   process.stdout.write(`Presentation smoke passed: ${checks} checks, PNGs stayed in RAM.\n`);
 } finally { await client.close().catch(() => {}); fixture.kill(); }

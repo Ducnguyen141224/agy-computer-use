@@ -22,7 +22,7 @@ try {
   await client.connect(transport);
   const catalog=(await client.listTools()).tools;
   check(catalog.filter(tool=>tool.name.startsWith('browser_')).length===7,'the real MCP connection exposes all seven browser tool groups');
-  const started=await call('browser_session',{operation:'start',browser:channel,headless});
+  const started=await call('browser_session',{operation:'start', connection:'isolated',browser:channel,headless});
   check(started.active&&started.scoped&&!started.personal_profile_attached&&!started.desktop_fallback,`real ${channel} ${headless?'headless':'visible'} browser starts in an owned isolated session`);
   const a=await call('browser_tabs',{operation:'new',url:fixture.url+'/main?tab=A'});
   const b=await call('browser_tabs',{operation:'new',url:fixture.url+'/main?tab=B'});
@@ -116,7 +116,7 @@ try {
   await call('desktop_system',{operation:'control_stop'},true);const interrupted=await waiting;
   check(interrupted.error?.code==='USER_STOPPED'&&Date.now()-stoppedAt<2000,'real native stop interrupts an in-flight browser wait without waiting for its deadline');
   check(!(await call('browser_session',{operation:'info'})).active,'stop closes the owned browser to cancel queued page input');
-  check((await call('browser_session',{operation:'start',browser:channel,headless},true)).error?.code==='USER_STOPPED','no browser restart can bypass the user stop latch');
+  check((await call('browser_session',{operation:'start', connection:'isolated',browser:channel,headless},true)).error?.code==='USER_STOPPED','no browser restart can bypass the user stop latch');
   await call('browser_session',{operation:'end'});
   check(!(await call('browser_session',{operation:'info'})).scoped,'explicit session end releases the browser-only tool scope');
   process.stdout.write(`Browser smoke passed ${checks} checks: ${channel}, ${headless?'headless':'visible'}; real pages, HTTP effects and PNG pixels. No evidence files saved.\n`);

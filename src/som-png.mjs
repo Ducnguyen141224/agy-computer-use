@@ -117,6 +117,19 @@ export function encodePng({ width, height, colorType, bpp, pixels }) {
   return Buffer.concat([PNG_SIG, makeChunk('IHDR', ihdr), makeChunk('IDAT', compressed), makeChunk('IEND', Buffer.alloc(0))]);
 }
 
+export function fitPng(pngBuffer, maximum = 1600) {
+  const image = decodePng(pngBuffer);
+  const ratio = Math.min(1, maximum / Math.max(image.width, image.height));
+  if(ratio === 1) return {image:pngBuffer,width:image.width,height:image.height};
+  const width=Math.max(1,Math.round(image.width*ratio)),height=Math.max(1,Math.round(image.height*ratio));
+  const pixels=new Uint8Array(width*height*image.bpp);
+  for(let y=0;y<height;y++) for(let x=0;x<width;x++) {
+    const source=(Math.min(image.height-1,Math.floor(y/ratio))*image.width+Math.min(image.width-1,Math.floor(x/ratio)))*image.bpp;
+    pixels.set(image.pixels.subarray(source,source+image.bpp),(y*width+x)*image.bpp);
+  }
+  return {image:encodePng({...image,width,height,pixels}),width,height};
+}
+
 export function annotatePng(pngBuffer, marks) {
   if (!marks || marks.length === 0) return pngBuffer;
   const img = decodePng(pngBuffer);

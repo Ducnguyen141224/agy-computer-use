@@ -2,6 +2,18 @@
 
 Computer use cho Antigravity trên Windows, có MCP, CLI và C ABI. Engine C# gọi trực tiếp Windows UI Automation; MCP server dùng Node.js và SDK chính thức của Model Context Protocol. Từ v0.4.0, MCP có runtime JavaScript QuickJS/WASM giữ state trong RAM, task context gọn và hướng dẫn nạp theo nhu cầu. Không phụ thuộc, tải hoặc chạy engine của Vercel.
 
+## Chrome đang dùng và hiệu ứng theo thao tác (v0.9.0)
+
+`browser_session {"operation":"start"}` mặc định kết nối **Chrome đang mở**, dùng lại phiên đăng nhập hiện tại. Cần Chrome 144+; bạn mở `chrome://inspect/#remote-debugging`, bật remote debugging và chấp thuận hộp thoại kết nối của Chrome. Thiếu quyền sẽ trả `CHROME_CONNECTION_REQUIRED`, không tự mở browser/profile riêng. Cơ chế này theo [tài liệu Chrome](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session) và [Playwright connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp). Không sao chép cookie/profile; không đảm bảo vượt mọi hạn chế đăng nhập của website.
+
+AGY tạo tab công việc trong Chrome đó; không liệt kê/nhận quyền điều khiển tab cá nhân có sẵn hoặc tab bạn tự mở sau đó. Khi gửi input, AGY chọn đúng tab công việc để Chrome không treo chờ tab nền. Đọc DOM không đổi tab. `end`/ESC đóng các tab do AGY tạo và ngắt CDP, giữ Chrome, tab cá nhân và đăng nhập. Chrome/CDP cấp quyền kỹ thuật ở cấp browser; giới hạn tab do controller của plugin thực thi.
+
+Viền xanh/con trỏ chỉ hiện trong thao tác UI thực tế, ẩn sau khoảng 120–220ms khi thao tác kết thúc. Đọc UIA/DOM, chờ điều kiện, model suy nghĩ hoặc chờ npm/shell không giữ viền. `control_start` chỉ bật khả năng dừng bằng ESC; ESC vẫn dừng tác vụ khi hiệu ứng đang ẩn. Đây là hành vi triển khai của plugin, không tuyên bố dùng cùng nội bộ với Codex.
+
+Chỉ khi chủ động cần browser thử nghiệm tách biệt mới truyền `connection:'isolated'`; chế độ đó vẫn hỗ trợ Chrome/Edge, headless và profile công việc có tên. Các mô tả v0.6/v0.7 bên dưới là lịch sử; v0.9 thay mặc định browser và vòng đời hiển thị.
+
+Kiểm thử: `npm run test:browser:existing` dùng Chrome fixture đã mở trước với cookie HTTP-only và tab sentinel; không dùng dữ liệu cá nhân. `npm run test:activity` quan sát cửa sổ Win32 theo PID helper trong lúc kéo chuột, input browser, đọc/chờ và ESC. Kết quả in stdout, không lưu ảnh/video/log bằng chứng. Kiểm thử fixture không thay thế xác nhận quyền kết nối Chrome hằng ngày của người dùng.
+
 ## Cài đặt
 
 Target API là Windows 10 2004+, trên bản Windows được .NET 10 hỗ trợ, desktop đang mở khóa, Node.js 22+, .NET SDK 10 và Windows Desktop Runtime 10. Kiểm thử desktop thực hiện trên Windows 11 x64 của máy này; chưa kiểm chứng các bản Windows khác hoặc ARM64. Helper framework-dependent, tự restore dependency NuGet khi build.
@@ -36,7 +48,7 @@ Gói có manifest, skill, mcp.json cho Agent Plugins và mcp_config.json tương
 
 ## Hiệu ứng điều khiển và phím ESC
 
-Từ v0.5.0, plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ đen viền sáng cùng vòng hiệu ứng nhấn chuột. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên khi có. Overlay xuyên click và không lấy focus; từ v0.6.0, viền giữ hiện giữa các lần gọi MCP cho đến control_end/ESC/ngắt kết nối. Native một lần gọi không có control_start vẫn tự ẩn sau 1,8 giây.
+Plugin tự hiện viền xanh quanh từng màn hình, nhãn “AGY đang điều khiển · ESC để dừng” và con trỏ đen viền sáng khi có thao tác UI. Không cần gọi `cursor_config`. Profile con trỏ tùy chỉnh vẫn được ưu tiên. Overlay xuyên click và không lấy focus. Từ v0.9, hiệu ứng ẩn khi input kết thúc; phiên task tiếp tục giữ ESC mà không giữ viền.
 
 Từ v0.5.1, con trỏ mặc định là mũi tên **đen viền trắng**, bỏ quầng xanh thường trực. Viền màn hình được giữ tĩnh; con trỏ dùng surface alpha 112×112 pixel trên luồng render riêng, không dùng chung luồng clipboard/shell. Đồng hồ độ phân giải cao nhắm tối đa 120 nhịp gửi frame/giây khi có animation, ngừng khi đứng yên. Chuyển hướng nội suy theo vận tốc đang chạy; lệnh trùng điểm đến không khởi động lại chuyển động. Đây là tối ưu của plugin, không phải cam kết FPS hay bản sao từng pixel của Codex.
 
@@ -243,7 +255,7 @@ Repo `vercel-labs/agent-desktop` được tham khảo về vòng lặp observe/a
 
 ## Đọc trực tiếp và tác vụ liên tục (v0.6.0)
 
-MCP tự mở phiên hiển thị khi bắt đầu dùng desktop: viền xanh giữ suốt các lần đọc/thao tác và thời gian model suy nghĩ. Gọi `desktop_system {"operation":"control_end"}` trong finally khi hoàn tất, hủy hoặc bàn giao cho người dùng; ESC vẫn dừng và khóa input. Native/CLI có thể dùng control_start/control_end trực tiếp. Phiên hiển thị không giữ mutex input giữa các lần gọi.
+MCP tự bật hook ESC khi bắt đầu dùng desktop. Từ v0.9, đọc và thời gian model suy nghĩ không hiện viền. Gọi `desktop_system {"operation":"control_end"}` trong finally khi hoàn tất, hủy hoặc bàn giao cho người dùng. Native/CLI có thể dùng control_start/control_end trực tiếp. Phiên task không giữ mutex input giữa các lần gọi.
 
 `desktop_read {"operation":"snapshot","window_id":"..."}` lấy văn bản trực tiếp từ UIA/TextPattern/ValuePattern, bỏ qua password, không tạo ảnh. Với vùng cuộn được chọn rõ ràng, gọi collect với root_ref và direction up/down. Kết quả có reader_id khi cần tiếp tục. Giới hạn max_pages/max_chars/budget_ms chỉ chia nội dung thành phần nhỏ; agent tiếp tục cùng reader_id. pause_ms mặc định 100; cuộn theo 65% khung nhìn (fallback bước nhỏ khi thiếu view size) và so khớp phần chồng lặp, giữ các dòng trùng trong một trang.
 
@@ -253,7 +265,7 @@ Chạy `npm run test:reading` để kiểm tra trên cửa sổ WPF thử nghi�
 
 ## Browser theo tab riêng (v0.7.0)
 
-Cùng plugin có thêm bảy nhóm tool MCP: browser_session, browser_tabs, browser_read, browser_act, browser_wait, browser_capture và browser_dialog. Chrome/Edge phải được cài sẵn. Phần browser dùng playwright-core 1.65.1 với browser channel đã cài, pipe và profile tạm; không attach trình duyệt/profile cá nhân, không mở cổng debug. Native desktop CLI/FFI và desktop_run không chạy API browser.
+Cùng plugin có bảy nhóm tool MCP: browser_session, browser_tabs, browser_read, browser_act, browser_wait, browser_capture và browser_dialog. Phần browser dùng playwright-core 1.65.1. v0.9 mặc định kết nối Chrome đang dùng; mode `connection:'isolated'` giữ cách chạy bằng pipe/profile riêng trước đây. Native desktop CLI/FFI không chạy browser; từ v0.8 desktop_run hỗ trợ browser.* trong browser scope.
 
 Luồng chuẩn:
 
@@ -271,7 +283,7 @@ browser_read trả chữ DOM và refs có kiểm tra identity; ref hết hạn s
 
 browser_act hỗ trợ click, double_click, hover, fill, type, press, check/uncheck, select_option theo nhãn, scroll page/element, drag cùng tab, click_point và mouse_move. Các target trùng bị từ chối. Capture là một PNG viewport trong RAM, không có tùy chọn path; token 10 giây, dùng một lần, ràng buộc tab, navigation, scroll và bộ đếm thay đổi DOM chính. Bộ đếm không phát hiện đầy đủ canvas repaint hoặc thay đổi trong iframe/shadow root. Ảnh giữ cách che ký tự password thông thường của trình duyệt; không phải bộ lọc mọi dữ liệu nhạy cảm. Luôn quan sát mới và xác minh sau input.
 
-Dialog JS cần inspect/accept/dismiss rõ ràng; không tự accept. Timeout/cancel không lặp input. Delivery không rõ buộc đọc/capture mới rồi reconcile với recovery_note. Cancel đang chạy đóng đúng tab đó để ngăn input giao muộn. ESC/control_stop đóng browser riêng và giữ stop latch; mất helper ESC cũng dừng browser và giữ scope khóa; không hoàn tác tác động đã gửi. Profile tạm và dữ liệu đăng nhập không được giữ sau khi đóng; cần đăng nhập thủ công trong browser riêng nếu trang yêu cầu. Không hỗ trợ upload/download file, tự nhập password, gắn profile đang đăng nhập hay arbitrary JavaScript/evaluate qua MCP.
+Dialog JS cần inspect/accept/dismiss rõ ràng; không tự accept. Timeout/cancel không lặp input. Delivery không rõ buộc đọc/capture mới rồi reconcile với recovery_note. Cancel đang chạy đóng đúng tab đó để ngăn input giao muộn. ESC/control_stop hoặc mất helper ESC dừng tác vụ và giữ scope khóa; existing mode chỉ đóng tab công việc và ngắt kết nối, isolated mode đóng browser riêng. Không hoàn tác tác động đã gửi. Chế độ existing dùng đăng nhập sẵn có; chế độ isolated tạm không giữ đăng nhập sau khi đóng (profile công việc có tên thì giữ). Không hỗ trợ upload/download file, tự nhập password hay arbitrary JavaScript/evaluate qua MCP.
 
 Không ghi screenshot, video, trace, HAR hay báo cáo test ra đĩa. Trình duyệt vẫn tạo cache/profile tạm như dữ liệu vận hành thông thường; Playwright dọn profile của nó khi đóng bình thường. Đây là cơ chế định tuyến tab cho agent, không phải sandbox an ninh cho mọi hành vi JavaScript của website. Việc model Antigravity tự chọn đúng tool và tiếp tục lượt thuộc host; một lần gọi tool thành công không chứng minh agent host tự vận hành đúng.
 

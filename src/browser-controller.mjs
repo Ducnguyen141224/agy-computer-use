@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
-import { annotatePng } from './som-png.mjs';
+import { annotatePng, fitPng } from './som-png.mjs';
 
 export class BrowserError extends Error {
   constructor(code, message, details) { super(message); this.code=code; this.details=details; }
@@ -37,6 +37,7 @@ export class BrowserController {
     this.bridge=bridge; this.browser=null; this.context=null; this.scoped=false; this.sessionId=null;
     this.tabs=new Map(); this.pages=new WeakMap(); this.interrupted=null; this.generation=0; this.closing=null; this.refSeq=0;
     this.persistentProfile=null; this.starterPage=null; this.handoff=null; this.contextClosed=false; this.headless=false; this.channel=undefined;
+    this.attached=false; this.connectionMode='existing';
   }
   get active() {return (this.browser ? this.browser.isConnected() : !this.contextClosed) && !!this.context;}
   #profilesRoot() {return join(process.env.LOCALAPPDATA ?? tmpdir(), 'agy-computer-use', 'profiles');}
@@ -56,9 +57,17 @@ export class BrowserController {
     if(existed) rmSync(dir, {recursive:true, force:true});
     return {profile:name, cleared:true, existed};
   }
-  #summary() {return {session_id:this.sessionId,active:this.active,scoped:this.scoped,browser:this.channel,headless:this.headless,profile:this.persistentProfile??null,persistent_profile:!!this.persistentProfile,handoff:this.handoff,tab_count:[...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length,stop_reason:this.interrupted,transport:this.persistentProfile?'Playwright pipe; isolated agent work profile':'Playwright pipe; owned temporary browser profile',personal_profile_attached:false,desktop_fallback:false,memory_only_content:true};}
+  #summary() {return {session_id:this.sessionId,active:this.active,scoped:this.scoped,browser:this.channel,connection:this.connectionMode,headless:this.headless,profile:this.persistentProfile??null,persistent_profile:!!this.persistentProfile,handoff:this.handoff,tab_count:[...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length,stop_reason:this.interrupted,transport:this.attached?'Chrome user-approved CDP; existing login':this.persistentProfile?'Playwright pipe; isolated agent work profile':'Playwright pipe; owned temporary browser profile',personal_profile_attached:this.attached&&this.active,existing_personal_tabs_exposed:false,desktop_fallback:false,memory_only_content:true};}
   async request(name,args,{signal}={}) {
-    let entry=null, createdPage=null, mutating=false, timer, abort, cancelledCleanup;
+    let entry=null, createdPage=null, mutating=false, timer, abort, cancelledCleanup, activityToken=null, activityGeneration=0, finishing=false, cancelled=null;
+    const releaseActivity=async()=>{
+      const token=activityToken;activityToken=null;
+      if(token&&this.bridge.child&&this.bridge.generation===activityGeneration&&!this.bridge.closed) {
+        let released=false;
+        try {released=(await this.bridge.request('presentation',{operation:'end',token})).ok===true;} catch {}
+        if(!released) this.bridge.invalidate();
+      }
+    };
     try {
       if(name==='browser_session' && args.operation==='info') return {ok:true,data:this.#summary()};
       if(name==='browser_session' && args.operation==='end') {await this.close(); return {ok:true,data:{...this.#summary(),ended:true}};}
@@ -81,8 +90,23 @@ export class BrowserController {
       }
       if(this.bridge.userStopped) fail('USER_STOPPED','Control was stopped; resume only after a new explicit user request.');
       if(this.interrupted==='USER_STOPPED') this.interrupted=null; // Only the bridge's explicit control_resume can clear its latch.
-      const timeout=args.timeout_ms??(name==='browser_session'?15000:5000);
-      let cancelled=null;
+      const timeout=args.timeout_ms??(name==='browser_session'?35000:5000);
+      const dispatched=async()=>{
+        if(finishing||cancelled||signal?.aborted) fail(cancelled??'CANCELLED','Request expired before input.',{delivery:'not_sent'});
+        mutating=true;
+        if(!this.headless&&!activityToken) {
+          const activity=await this.bridge.request('presentation',{operation:'begin'},{signal});
+          if(!activity.ok) fail(activity.error?.code??'PRESENTATION_UNAVAILABLE',activity.error?.message??'Control indicator unavailable. No new input was sent.');
+          activityToken=activity.data.token;activityGeneration=this.bridge.generation;
+          if(finishing||cancelled) {await releaseActivity();fail(cancelled??'CANCELLED','Request expired before input.');}
+        }
+        if(this.bridge.userStopped||this.interrupted==='USER_STOPPED') fail('USER_STOPPED','Escape stopped control; no new input was sent.');
+        if(signal?.aborted) fail('CANCELLED','Request cancelled before input.');
+        // Real Chrome can throttle background pages. Select only our work tab when
+        // sending input; reads never switch the user's foreground tab.
+        if(this.attached&&entry&&!entry.page.isClosed()) await entry.page.bringToFront();
+        if(finishing||cancelled||signal?.aborted) fail(cancelled??'CANCELLED','Request expired before input.');
+      };
       const cancellation=new Promise((_,reject)=>{
         const cancel=(code='CANCELLED')=>{
           cancelled=code;
@@ -107,19 +131,22 @@ export class BrowserController {
           fail('INVALID_ARGUMENT','Unsupported browser_session operation.');
         }
         this.#connected();
-        if(name==='browser_tabs') return this.#tabs(args,entry,timeout,()=>{mutating=true;},page=>{createdPage=page;});
+        if(name==='browser_tabs') return this.#tabs(args,entry,timeout,dispatched,async page=>{
+          createdPage=page;
+          if(finishing||cancelled||signal?.aborted) {await page.close({runBeforeUnload:false});fail(cancelled??'CANCELLED','Tab creation expired; the late work tab was closed.');}
+        });
         if(entry.dialog && name!=='browser_dialog') fail('BROWSER_DIALOG_OPEN','Resolve this tab dialog explicitly before another page operation.');
         if(name==='browser_read') return this.#read(entry,args,timeout);
         if(name==='browser_capture') return this.#capture(entry,args,timeout);
         if(name==='browser_wait') return this.#wait(entry,args,timeout);
         if(name==='browser_dialog') {
           if(this.handoff?.active && ['accept','dismiss'].includes(args.operation)) fail('USER_HANDOFF_ACTIVE','User handoff is active. Call browser_session resume_handoff after user finishes.');
-          return this.#dialog(entry,args,()=>{mutating=true;});
+          return this.#dialog(entry,args,dispatched);
         }
         if(name==='browser_act') {
           if(this.handoff?.active) fail('USER_HANDOFF_ACTIVE','User handoff is active. Call browser_session resume_handoff after user finishes.');
           if(entry.uncertain) fail('RECONCILIATION_REQUIRED','Read this tab and explicitly reconcile before new input.',{delivery:'not_sent'});
-          return this.#act(entry,args,timeout,()=>{mutating=true;});
+          return this.#act(entry,args,timeout,dispatched);
         }
         fail('UNKNOWN_TOOL','Unknown browser tool.');
       })();
@@ -131,7 +158,9 @@ export class BrowserController {
       if(entry&&mutating) {entry.uncertain={code}; entry.freshRead=false;}
       return {ok:false,error:{code,message:error instanceof BrowserError?error.message:code==='BROWSER_DISCONNECTED'?'Owned browser disconnected. Start a new session explicitly; no fallback was used.':'Browser operation failed or timed out. Inspect the same tab before any retry.',details:error.details??{delivery:mutating?'unknown':'not_sent',replayed_actions:0}}};
     } finally {
+      finishing=true;
       clearTimeout(timer);if(abort) signal?.removeEventListener('abort',abort);
+      await releaseActivity();
       if(cancelledCleanup) await cancelledCleanup;
       if(['USER_STOPPED','NATIVE_CONTROL_LOST'].includes(this.interrupted)&&this.closing) await this.closing;
     }
@@ -149,12 +178,27 @@ export class BrowserController {
     if(this.scoped) fail('BROWSER_SESSION_EXISTS','End the existing browser session before starting another.');
     this.scoped=true; this.interrupted=null; this.handoff=null; this.contextClosed=false; const generation=++this.generation;
     this.channel=args.browser??'chrome'; this.headless=args.headless??false;
+    this.connectionMode=args.connection??'existing';this.attached=this.connectionMode==='existing';
     this.persistentProfile=args.profile??null;
     let launched=null, persistentCtx=null;
     try {
       const channelName=this.channel==='edge'?'msedge':'chrome';
       const commonOpts={channel:channelName,headless:this.headless,chromiumSandbox:true,handleSIGINT:false,handleSIGTERM:false,handleSIGHUP:false,timeout:15000};
-      if(this.persistentProfile) {
+      if(this.attached) {
+        let endpoint='chrome';
+        // Fixture-only selector. Production never accepts arbitrary CDP endpoints/profile paths from MCP.
+        if(process.env.AGY_CHROME_CDP_TEST_ENDPOINT&&/^[0-9a-f]{32}$/i.test(process.env.AGY_DESKTOP_TEST_SCOPE??'')) {
+          const url=new URL(process.env.AGY_CHROME_CDP_TEST_ENDPOINT);
+          if(url.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||url.username||url.password) fail('INVALID_ARGUMENT','Test CDP endpoint must be loopback HTTP.');
+          endpoint=url.href;
+        }
+        try { launched=await chromium.connectOverCDP(endpoint,{noDefaults:true,timeout:30000}); }
+        catch { fail('CHROME_CONNECTION_REQUIRED','Open chrome://inspect/#remote-debugging in your running Chrome, enable remote debugging and approve Chrome\'s connection prompt. No separate browser/profile was opened.',{settings_url:'chrome://inspect/#remote-debugging',fallback_opened:false}); }
+        if(generation!==this.generation) {await launched.close();fail('CANCELLED','Chrome connection was cancelled.');}
+        this.browser=launched;this.context=launched.contexts()[0];
+        if(!this.context) fail('CHROME_CONTEXT_UNAVAILABLE','The running Chrome did not provide its default context.');
+        this.starterPage=null;
+      } else if(this.persistentProfile) {
         const profileDir=this.#profileDir(this.persistentProfile);
         mkdirSync(profileDir, {recursive:true});
         persistentCtx=await chromium.launchPersistentContext(profileDir,{...commonOpts,acceptDownloads:false,viewport:{width:1280,height:800},deviceScaleFactor:1,serviceWorkers:'block'});
@@ -172,7 +216,11 @@ export class BrowserController {
         this.starterPage=null;
       }
       this.context.setDefaultTimeout(5000); this.context.setDefaultNavigationTimeout(5000);
-      this.context.on('page',page=>{if(page!==this.starterPage) this.#register(page,false);});
+      this.context.on('page',page=>{
+        if(generation!==this.generation||!this.context) return;
+        if(!this.attached) {if(page!==this.starterPage)this.#register(page,false);return;}
+        void page.opener().then(opener=>{if(generation===this.generation&&this.context&&opener&&this.pages.has(opener)&&!page.isClosed())this.#register(page,false);}).catch(()=>{});
+      });
       this.context.on('close',()=>{this.contextClosed=true;});
       this.browser?.on('disconnected',()=>{this.interrupted??='BROWSER_DISCONNECTED'; for(const tab of this.tabs.values()) this.#invalidate(tab);});
       this.sessionId='browser-'+randomUUID();
@@ -180,7 +228,7 @@ export class BrowserController {
     } catch(error) {
       if(persistentCtx) await persistentCtx.close().catch(()=>{});
       if(launched) await launched.close().catch(()=>{});
-      this.browser=null;this.context=null;this.scoped=false;this.sessionId=null;this.persistentProfile=null;this.starterPage=null;
+      this.browser=null;this.context=null;this.scoped=false;this.sessionId=null;this.persistentProfile=null;this.starterPage=null;this.attached=false;
       throw error;
     }
   }
@@ -225,28 +273,28 @@ export class BrowserController {
     if(operation==='new') {
       if([...this.tabs.values()].filter(tab=>!tab.page.isClosed()).length>=16) fail('TAB_LIMIT','Close an owned tab before opening another.');
       const url=browserUrl(args.url??'about:blank');
-      dispatched();
+      await dispatched();
       let page=null;
       if(this.starterPage && !this.starterPage.isClosed()) { page=this.starterPage; this.starterPage=null; }
       else page=await this.context.newPage();
-      onNewPage?.(page); entry=this.#register(page,true);
+      await onNewPage?.(page); entry=this.#register(page,true);
       if(!entry) fail('TAB_LIMIT','This new tab was closed because the owned-tab limit was reached.');
       try {await page.goto(url,{waitUntil:'domcontentloaded',timeout});} catch {entry.uncertain={code:'NAVIGATION_FAILED'};return {...await this.#tabInfo(entry),verification:'failed',delivery:'sent',reason:'Navigation was not confirmed. Inspect this exact tab; it was not recreated.'};}
       return {...await this.#tabInfo(entry),verification:'passed',delivery:'sent'};
     }
     if(operation==='info') return this.#tabInfo(entry);
     if(operation==='adopt') {browserUrl(entry.page.url());entry.managed=true;return this.#tabInfo(entry);}
-    if(operation==='close') {dispatched();await entry.page.close({runBeforeUnload:false});return {tab_id:entry.id,closed:true,verification:'passed'};}
+    if(operation==='close') {await dispatched();await entry.page.close({runBeforeUnload:false});return {tab_id:entry.id,closed:true,verification:'passed'};}
     if(operation==='reconcile') {
       if(!entry.uncertain||!entry.freshRead) fail('FRESH_READ_REQUIRED','Inspect this tab after its uncertain action before reconciling.');
       entry.uncertain=null;return {tab_id:entry.id,reconciled:true,note:args.recovery_note};
     }
     this.#ready(entry);
-    if(operation==='activate') {await entry.page.bringToFront();return {...await this.#tabInfo(entry),activation_requested:true};}
-    if(operation==='navigate') {const url=browserUrl(args.url);dispatched();await entry.page.goto(url,{waitUntil:'domcontentloaded',timeout});}
-    if(operation==='back') {dispatched();await entry.page.goBack({waitUntil:'domcontentloaded',timeout});}
-    if(operation==='forward') {dispatched();await entry.page.goForward({waitUntil:'domcontentloaded',timeout});}
-    if(operation==='reload') {dispatched();await entry.page.reload({waitUntil:'domcontentloaded',timeout});}
+    if(operation==='activate') {await dispatched();await entry.page.bringToFront();return {...await this.#tabInfo(entry),activation_requested:true};}
+    if(operation==='navigate') {const url=browserUrl(args.url);await dispatched();await entry.page.goto(url,{waitUntil:'domcontentloaded',timeout});}
+    if(operation==='back') {await dispatched();await entry.page.goBack({waitUntil:'domcontentloaded',timeout});}
+    if(operation==='forward') {await dispatched();await entry.page.goForward({waitUntil:'domcontentloaded',timeout});}
+    if(operation==='reload') {await dispatched();await entry.page.reload({waitUntil:'domcontentloaded',timeout});}
     return {...await this.#tabInfo(entry),verification:'passed',delivery:'sent'};
   }
   #frame(entry,id) {
@@ -271,7 +319,11 @@ export class BrowserController {
     else locator=frame.locator(spec.selector);
     const count=await locator.count();
     if(count!==1) fail(count?'AMBIGUOUS_TARGET':'TARGET_NOT_FOUND',count?'Several elements match; narrow the locator. No first/nth target was silently chosen.':'No element matches this locator in the selected tab/frame.');
-    const handle=await locator.elementHandle({timeout:1000});if(!handle) fail('STALE_BROWSER_REF','Target detached.');
+    // Query already-matched nodes directly. elementHandle() polls animation frames, which
+    // can be throttled in a normal background Chrome tab when noDefaults preserves user settings.
+    const handles=await locator.elementHandles();
+    if(handles.length!==1) {await Promise.all(handles.map(handle=>handle.dispose().catch(()=>{})));fail(handles.length?'AMBIGUOUS_TARGET':'STALE_BROWSER_REF','The unique target changed before it could be pinned.');}
+    const handle=handles[0];
     const info=await handle.evaluate(elementInfo);
     if(!info) {await handle.dispose();fail('STALE_BROWSER_REF','Target detached.');}
     return {handle,info,owned:true};
@@ -402,7 +454,8 @@ export class BrowserController {
       } else if(x>=capture.width||y>=capture.height) {
         fail('STALE_CAPTURE','Coordinates are outside this image.');
       }
-      dispatched();
+      if(args.action!=='click_mark') {x=x*(capture.scaleX??1);y=y*(capture.scaleY??1);}
+      await dispatched();
       if(args.action==='mouse_move') await entry.page.mouse.move(x,y);
       else await entry.page.mouse.click(x,y);
       entry.captures.clear();
@@ -420,14 +473,14 @@ export class BrowserController {
         const destination=await this.#resolve(entry,{ref:args.to_ref});
         if(destination.info.password) fail('PASSWORD_FIELD','Password targets are excluded.');
         const sourceBox=await target.handle.boundingBox(),endBox=await destination.handle.boundingBox();
-        const viewport=entry.page.viewportSize();
+        const viewport=entry.page.viewportSize()??await entry.page.evaluate(()=>({width:innerWidth,height:innerHeight}));
         if(!sourceBox||!endBox||[sourceBox,endBox].some(box=>box.x<0||box.y<0||box.x+box.width>viewport.width||box.y+box.height>viewport.height)) fail('NOT_ACTIONABLE','Scroll both drag endpoints fully into this tab viewport first.');
-        dispatched();await entry.page.mouse.move(sourceBox.x+sourceBox.width/2,sourceBox.y+sourceBox.height/2);
+        await dispatched();await entry.page.mouse.move(sourceBox.x+sourceBox.width/2,sourceBox.y+sourceBox.height/2);
         try {await entry.page.mouse.down();await entry.page.mouse.move(endBox.x+endBox.width/2,endBox.y+endBox.height/2,{steps:12});} finally {await entry.page.mouse.up().catch(()=>{});}
       } else {
         let dialogWake;const dialogOpened=new Promise(resolve=>{dialogWake=resolve;});entry.dialogWake=dialogWake;
         const execute=async()=>{
-          dispatched();const opts={timeout};
+          await dispatched();const opts={timeout};
           switch(args.action) {
             case 'click':await target.handle.click(opts);break;
             case 'double_click':await target.handle.dblclick(opts);break;
@@ -515,21 +568,22 @@ export class BrowserController {
     const state=await this.#stamp(entry),revision=entry.revision;
     // Keep the DOM intact: default caret-hiding/masking injects temporary styles and breaks
     // mutation validation. Browser password inputs render their normal masked characters.
-    let bytes=await entry.page.screenshot({type:'png',fullPage:false,caret:'initial',timeout});
+    let bytes=await entry.page.screenshot({type:'png',fullPage:false,caret:'initial',scale:'css',timeout});
     if(entry.revision!==revision||JSON.stringify(state)!==JSON.stringify(await this.#stamp(entry))) fail('CAPTURE_CHANGED','The page changed during capture. No point token was issued.');
-    const width=bytes.readUInt32BE(16),height=bytes.readUInt32BE(20);if(width>1600||height>1600) fail('CAPTURE_LIMIT','Viewport exceeded the browser image budget.');
-    if(rawMarks&&rawMarks.length>0) bytes=annotatePng(bytes,rawMarks);
+    const fitted=fitPng(bytes);bytes=fitted.image;
+    const width=fitted.width,height=fitted.height,scaleX=state.width/width,scaleY=state.height/height;
+    if(rawMarks&&rawMarks.length>0) bytes=annotatePng(bytes,rawMarks.map(mark=>({...mark,bounds:{x:Math.round(mark.bounds.x/scaleX),y:Math.round(mark.bounds.y/scaleY),width:Math.round(mark.bounds.width/scaleX),height:Math.round(mark.bounds.height/scaleY)}})));
     const capture_id='bcap-'+randomUUID();entry.captures.clear();
-    entry.captures.set(capture_id,{state,revision,width,height,expires:Date.now()+10000,marks:rawMarks?new Map(rawMarks.map(m=>[m.mark,{x:m.cx,y:m.cy,role:m.role,name:m.name}])):null});
+    entry.captures.set(capture_id,{state,revision,width,height,scaleX,scaleY,expires:Date.now()+10000,marks:rawMarks?new Map(rawMarks.map(m=>[m.mark,{x:m.cx,y:m.cy,role:m.role,name:m.name}])):null});
     entry.freshRead=true;
-    return {tab_id:entry.id,capture_id,width,height,...(rawMarks?{marks:rawMarks.map(m=>({mark:m.mark,role:m.role,name:m.name}))}:{}),image:bytes.toString('base64'),coordinate_system:'tab viewport CSS pixels; single use; 10s',memory_only:true};
+    return {tab_id:entry.id,capture_id,width,height,source_viewport:{width:state.width,height:state.height},...(rawMarks?{marks:rawMarks.map(m=>({mark:m.mark,role:m.role,name:m.name}))}:{}),image:bytes.toString('base64'),coordinate_system:'returned image pixels mapped to this tab viewport; single use; 10s',memory_only:true};
   }
   async #dialog(entry,args,dispatched) {
     if(!entry.dialog) {if(args.operation==='inspect') return {tab_id:entry.id,dialog:null};fail('DIALOG_NOT_FOUND','This tab has no pending JavaScript dialog.');}
     const dialog=entry.dialog;
     if(args.operation==='inspect') return {tab_id:entry.id,dialog:{type:dialog.type(),message:bounded(dialog.message(),2000),default_value:bounded(dialog.defaultValue(),1000)}};
     if(args.prompt_text!==undefined&&dialog.type()!=='prompt') fail('INVALID_ARGUMENT','prompt_text requires a prompt dialog.');
-    dispatched();
+    await dispatched();
     entry.dialog=null;
     let dialogWake; const dialogOpened=new Promise(resolve=>{dialogWake=resolve;}); entry.dialogWake=dialogWake;
     try {
@@ -546,12 +600,17 @@ export class BrowserController {
   stop(code='USER_STOPPED') {this.interrupted=code;this.generation++;return this.#dispose(false);}
   async #dispose(endScope) {
     if(this.closing) {await this.closing;if(endScope){this.tabs.clear();this.pages=new WeakMap();this.scoped=false;this.sessionId=null;this.interrupted=null;this.persistentProfile=null;this.starterPage=null;this.handoff=null;}return;}
-    const browser=this.browser,context=this.context,isPersistent=!!this.persistentProfile;
+    const browser=this.browser,context=this.context,isPersistent=!!this.persistentProfile,isAttached=this.attached;
     this.browser=null;this.context=null;this.starterPage=null;
     for(const entry of this.tabs.values()) this.#invalidate(entry);
     this.closing=(async()=>{
       const target=isPersistent?context:browser;
       if(target) {
+        if(isAttached) {
+          const pages=[...this.tabs.values()].map(tab=>tab.page).filter(page=>!page.isClosed());
+          await Promise.allSettled(pages.map(page=>page.close({runBeforeUnload:false})));
+          if(pages.some(page=>!page.isClosed())) {this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','An agent work tab did not close. Personal Chrome was left open; the session remains scoped.');}
+        }
         try {await target.close();}
         catch {if(browser?.isConnected()){this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','Owned browser closure was not confirmed. The browser scope remains locked.');}}
         if(browser?.isConnected()){this.browser=browser;this.context=context;fail('BROWSER_CLOSE_UNCONFIRMED','Owned browser is still connected; scope was not released.');}

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { tools, validateCall, toolResult } from '../src/tools.mjs';
 import { browserUrl, BrowserController } from '../src/browser-controller.mjs';
-import { annotatePng, decodePng, encodePng } from '../src/som-png.mjs';
+import { annotatePng, decodePng, encodePng, fitPng } from '../src/som-png.mjs';
 import { chromium } from 'playwright-core';
 const valid=(name,args)=>validateCall(tools.find(tool=>tool.name===name),args);
 
@@ -10,9 +10,62 @@ test('browser URLs cannot select local/internal files, script schemes, relative 
   for(const url of ['file:///C:/Windows/win.ini','javascript:alert(1)','data:text/html,test','chrome://settings','/relative','https://user:secret@example.com/']) assert.throws(()=>browserUrl(url));
   assert.equal(browserUrl('about:blank'),'about:blank');assert.equal(browserUrl('https://example.com'),'https://example.com/');
 });
-test('browser launch accepts no profile attachment, arbitrary executable, arguments or raw CDP endpoint',()=>{
-  for(const extra of [{profile_dir:'C:/personal'},{executable:'tool.exe'},{args:['--user-data-dir=C:/personal']},{cdp:'http://localhost:9222'},{code:'return process.env'}]) assert.throws(()=>valid('browser_session',{operation:'start',...extra}));
+test('browser launch rejects raw profile paths, executables, arguments and CDP endpoints',()=>{
+  for(const extra of [{profile_dir:'C:/personal'},{executable:'tool.exe'},{args:['--user-data-dir=C:/personal']},{cdp:'http://localhost:9222'},{code:'return process.env'}]) assert.throws(()=>valid('browser_session',{operation:'start', connection:'isolated',...extra}));
   assert.throws(()=>valid('browser_session',{operation:'info',browser:'chrome'}));
+});
+
+test('existing Chrome is the default; isolated launch options require explicit opt-in',()=>{
+  valid('browser_session',{operation:'start'});
+  valid('browser_session',{operation:'start',connection:'existing',browser:'chrome'});
+  for(const extra of [{headless:true},{profile:'work'},{browser:'edge'}]) {
+    assert.throws(()=>valid('browser_session',{operation:'start',...extra}));
+    valid('browser_session',{operation:'start',connection:'isolated',...extra});
+  }
+  assert.throws(()=>valid('browser_session',{operation:'info',connection:'existing'}));
+});
+
+test('existing Chrome connection failure never falls back to a new profile',async()=>{
+  const bridge={userStopped:false,async request(){return {ok:true,data:{armed:true}};}};
+  const controller=new BrowserController(bridge),originalConnect=chromium.connectOverCDP,originalLaunch=chromium.launch;
+  let launched=false,endpoint;
+  chromium.connectOverCDP=async(value,options)=>{endpoint=value;assert.equal(options.noDefaults,true);throw new Error('Chrome permission not granted');};
+  chromium.launch=async()=>{launched=true;throw new Error('Must not launch');};
+  try {
+    const reply=await controller.request('browser_session',{operation:'start'});
+    assert.equal(reply.error?.code,'CHROME_CONNECTION_REQUIRED');assert.equal(reply.error.details.fallback_opened,false);
+    assert.equal(endpoint,'chrome');assert.equal(launched,false);assert.equal(controller.scoped,false);
+  } finally {chromium.connectOverCDP=originalConnect;chromium.launch=originalLaunch;}
+});
+
+test('large attached-browser PNGs fit the coordinate budget without resizing the real viewport',()=>{
+  const width=2000,height=1000,bpp=4,pixels=new Uint8Array(width*height*bpp);pixels.fill(255);
+  const index=(500*width+1000)*bpp;pixels.set([10,20,30,255],index);
+  const src=encodePng({width,height,bpp,colorType:6,pixels});const fitted=fitPng(src);
+  assert.equal(fitted.width,1600);assert.equal(fitted.height,800);
+  const decoded=decodePng(fitted.image);const scaled=(400*1600+800)*4;
+  assert.deepEqual([...decoded.pixels.slice(scaled,scaled+4)],[10,20,30,255]);
+  const small=fitPng(fitted.image);assert.equal(small.image,fitted.image);
+});
+
+test('a late presentation lease is released after timeout and cannot send browser input',async()=>{
+  let finishBegin,released=0,created=0,connected=true;
+  const context={setDefaultTimeout(){},setDefaultNavigationTimeout(){},on(){},async newPage(){created++;throw new Error('Late input must not run');}};
+  const browser={isConnected:()=>connected,contexts:()=>[context],on(){},async close(){connected=false;}};
+  const bridge={userStopped:false,child:{},generation:1,closed:false,invalidate(){throw new Error('Cleanup should succeed');},async request(method,args){
+    if(method==='presentation'&&args.operation==='begin') return new Promise(resolve=>{finishBegin=resolve;});
+    if(method==='presentation'&&args.operation==='end') released++;
+    return {ok:true,data:{}};
+  }};
+  const original=chromium.connectOverCDP;chromium.connectOverCDP=async()=>browser;
+  const controller=new BrowserController(bridge);
+  try {
+    assert.ok((await controller.request('browser_session',{operation:'start'})).ok);
+    const reply=await controller.request('browser_tabs',{operation:'new',timeout_ms:100});assert.equal(reply.error?.code,'BROWSER_TIMEOUT');
+    finishBegin({ok:true,data:{token:'late-token'}});
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert.equal(released,1);assert.equal(created,0);
+  } finally {await controller.close();chromium.connectOverCDP=original;}
 });
 test('existing-tab calls always require a tab id and a unique structured target',()=>{
   assert.throws(()=>valid('browser_read',{operation:'text'}));
@@ -49,28 +102,28 @@ test('failed browser_session start resets scoped flag cleanly',async()=>{
   const originalLaunch=chromium.launch;
   chromium.launch=async()=>{throw new Error('Simulated launch failure');};
   try {
-    const first=await controller.request('browser_session',{operation:'start',browser:'chrome',headless:true});
+    const first=await controller.request('browser_session',{operation:'start', connection:'isolated',browser:'chrome',headless:true});
     assert.equal(first.ok,false);
     assert.equal(controller.scoped,false);
     assert.equal(controller.active,false);
-    const second=await controller.request('browser_session',{operation:'start',browser:'chrome',headless:true});
+    const second=await controller.request('browser_session',{operation:'start', connection:'isolated',browser:'chrome',headless:true});
     assert.notEqual(second.error?.code,'BROWSER_SESSION_EXISTS');
   } finally { chromium.launch=originalLaunch; }
 });
 
 test('browser profile, handoff, capture annotate, and click_mark contracts validate strictly',()=>{
-  valid('browser_session',{operation:'start',browser:'chrome',profile:'work-test_1'});
+  valid('browser_session',{operation:'start', connection:'isolated',browser:'chrome',profile:'work-test_1'});
   valid('browser_session',{operation:'list_profiles'});
   valid('browser_session',{operation:'clear_profile',profile:'work-test_1'});
   valid('browser_session',{operation:'handoff',reason:'2FA login'});
   valid('browser_session',{operation:'resume_handoff'});
   for(const bad of [
-    {operation:'start',profile:'../escape'},
-    {operation:'start',profile:'C:/personal'},
-    {operation:'start',profile:'a',profile_dir:'C:/x'},
+    {operation:'start', connection:'isolated',profile:'../escape'},
+    {operation:'start', connection:'isolated',profile:'C:/personal'},
+    {operation:'start', connection:'isolated',profile:'a',profile_dir:'C:/x'},
     {operation:'clear_profile'},
     {operation:'info',profile:'work'},
-    {operation:'start',reason:'nope'}
+    {operation:'start', connection:'isolated',reason:'nope'}
   ]) assert.throws(()=>valid('browser_session',bad));
 
   valid('browser_read',{tab_id:'t',operation:'snapshot',include_text:false});

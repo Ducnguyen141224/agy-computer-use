@@ -12,6 +12,21 @@ internal static class ControlProbe
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string? type, string title);
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    private delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(WindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, System.Text.StringBuilder text, int length);
+    private static IntPtr OwnedWindow(int pid, string title)
+    {
+        var result = IntPtr.Zero;
+        EnumWindows((window, _) => {
+            GetWindowThreadProcessId(window, out var owner);
+            if (owner != pid) return true;
+            var text = new System.Text.StringBuilder(100); GetWindowText(window, text, text.Capacity);
+            if (text.ToString() != title) return true;
+            result = window; return false;
+        }, IntPtr.Zero);
+        return result;
+    }
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
     [DllImport("user32.dll")] private static extern IntPtr SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern uint SendInput(uint count, Input[] input, int size);
@@ -46,9 +61,10 @@ internal static class ControlProbe
                     data = new { value = ((ValuePattern)field.GetCurrentPattern(ValuePattern.Pattern)).Current.Value };
                 }
                 else if (line == "held") data = new { ctrl = (GetAsyncKeyState(0x11) & 0x8000) != 0, shift = (GetAsyncKeyState(0x10) & 0x8000) != 0, left = (GetAsyncKeyState(1) & 0x8000) != 0 };
-                else if (line == "visual")
+                else if (line == "visual" || line.StartsWith("visual:", StringComparison.Ordinal))
                 {
-                    var window = FindWindow(null, "AGY control indicator"); var styles = window == IntPtr.Zero ? 0L : GetWindowLongPtr(window, -20).ToInt64();
+                    var ownerPid = line == "visual" ? 0 : int.Parse(line[7..]);
+                    var window = ownerPid == 0 ? FindWindow(null, "AGY control indicator") : OwnedWindow(ownerPid, "AGY control indicator"); var styles = window == IntPtr.Zero ? 0L : GetWindowLongPtr(window, -20).ToInt64();
                     var samples = Screen.AllScreens.Select(screen =>
                     {
                         using var bitmap = new Bitmap(1, 1); using var graphics = Graphics.FromImage(bitmap);
@@ -57,7 +73,7 @@ internal static class ControlProbe
                         finally { graphics.ReleaseHdc(target); ReleaseDC(IntPtr.Zero, desktop); }
                         var color = bitmap.GetPixel(0, 0); return new[] { (int)color.R, color.G, color.B };
                     }).ToArray();
-                    var pointer = FindWindow(null, "AGY animated pointer");
+                    var pointer = ownerPid == 0 ? FindWindow(null, "AGY animated pointer") : OwnedWindow(ownerPid, "AGY animated pointer");
                     data = new { rendered = window != IntPtr.Zero && IsWindowVisible(window), pointer_visible = pointer != IntPtr.Zero && IsWindowVisible(pointer), click_through = (styles & 0x20) != 0, no_activate = (styles & 0x08000000) != 0, foreground, borders = samples };
                 }
                 else throw new InvalidOperationException("Unknown probe command.");

@@ -50,7 +50,7 @@ internal static class CursorOverlay
     }
     private static OverlayForm? form;
     private static volatile bool enabled;
-    private static volatile bool suspended;
+    private static volatile bool suspended = true;
     internal static bool HasEnabledProfile => enabled;
     internal static void Suspend(bool value) { suspended = value; if (form != null) StaDispatcher.Post(() => { if (form != null) { if (suspended) form.Hide(); else if (enabled) { if (!form.Visible) form.Show(); Native.SetWindowPos(form.Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); } } }); }
     private static string active = "default";

@@ -29,13 +29,13 @@ internal sealed partial class DesktopService : IDisposable
     {
         if (workflowLease != null && DateTime.UtcNow >= workflowLeaseDeadline) { ReleaseWorkflowLease(); throw new DesktopError("WORKFLOW_EXPIRED", "Workflow lease expired. Inspect UI; no action was retried."); }
         if (method == "lease") return WorkflowLease(args);
+        if (method == "presentation") return PresentationLease(args);
         Prune();
         ValidateCommand(method, args);
         using var input = IsControlMutation(method, args) || method == "read" && args.Text("operation") == "collect" ? new InputLease() : null;
         var metadata = method == "system" && args.Text("operation") is "status" or "permissions" or "version" or "control_status" or "control_stop" or "control_resume" or "control_end";
         if (!metadata) EnsureDesktop();
-        var reading = method is "windows" or "observe" or "find" or "capture" or "query" or "read";
-        using var activity = IsControlMutation(method, args) || reading && !ControlPresentation.Paused ? ControlPresentation.Begin() : null;
+        using var activity = method != "batch" && (IsControlMutation(method, args) || method == "read" && args.Text("operation") == "collect") ? ControlPresentation.Begin() : null;
         return method switch
         {
             "windows" => ListWindows(args),
@@ -52,7 +52,7 @@ internal sealed partial class DesktopService : IDisposable
         };
     }
     private static bool IsControlMutation(string method, JsonElement args) => args.Flag("open") || method is "act" or "batch" || method == "system" && args.Text("operation") is not ("status" or "permissions" or "version" or "list_apps" or "list_displays" or "window_info" or "clipboard_get" or "list_surfaces" or "list_notifications" or "cursor_status" or "cursor_config" or "cursor_remove" or "control_status" or "control_resume" or "control_stop" or "control_start" or "control_end");
-    public void Dispose() { ReleaseWorkflowLease(); ControlPresentation.Close(); CursorOverlay.Close(); WindowCapture.DisposeShared(); Native.ReleaseOwnedInput(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
+    public void Dispose() { ReleaseWorkflowLease(); foreach(var activity in presentationLeases.Values) activity.Dispose(); presentationLeases.Clear(); ControlPresentation.Close(); CursorOverlay.Close(); WindowCapture.DisposeShared(); Native.ReleaseOwnedInput(); ClearWatches(); Native.CloseShellCommandWindow(); StaDispatcher.Shutdown(); }
 
     private static void EnsureDesktop()
     {

@@ -19,9 +19,9 @@ try {
   const started = Date.now();
   const window_id = (await call('desktop_query', { operation: 'window_wait', query: title, timeout_ms: 5000 })).windows.find(item => item.pid === fixture.pid).id;
   const scope = await call('desktop_system', { operation: 'control_status' });
-  check(scope.active && scope.task_active && scope.rendered && scope.idle_hide_ms === undefined, 'read-only desktop work automatically opens a persistent rendered border');
+  check(scope.armed && scope.task_active && !scope.active && !scope.rendered && scope.idle_hide_ms === 120, 'read-only desktop work arms Escape without showing overlays');
   await new Promise(resolve => setTimeout(resolve, 2200));
-  check((await call('desktop_system', { operation: 'control_status' })).rendered, 'border remains rendered across model idle time beyond the old 1.8-second cutoff');
+  check(!(await call('desktop_system', { operation: 'control_status' })).rendered, 'border stays hidden across model idle time');
   const matches = await call('desktop_find', { window_id, name: 'Reader log', exact: true, depth: 5 });
   assert.equal(matches.items.length, 1);
   const root_ref = matches.items[0].ref;

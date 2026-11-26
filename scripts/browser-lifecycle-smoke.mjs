@@ -20,7 +20,7 @@ const fixture=await browserFixture();const bridge=new NativeBridge();const contr
 let checks=0;
 const check=(value,message)=>{assert.ok(value,message);checks++;process.stdout.write(`PASS ${message}\n`);};
 const call=async(name,args,allowError=false,options)=>{const reply=await controller.request(name,args,options);if(!allowError)assert.equal(reply.ok,true,JSON.stringify(reply));return reply;};
-const start=async()=>call('browser_session',{operation:'start',browser:channel,headless:true});
+const start=async()=>call('browser_session',{operation:'start', connection:'isolated',browser:channel,headless:true});
 const open=async(label)=>(await call('browser_tabs',{operation:'new',url:fixture.url+'/main?tab='+label})).data.tab_id;
 try {
   await start();
@@ -65,6 +65,6 @@ try {
   check(!own.isConnected()&&!controller.browser.scoped,'session end actually closes its browser process connection and releases the task scope');
   check((await call('desktop_session',{operation:'info'})).ok,'desktop tools are available again only after explicit browser session end');
   const never=new AbortController();never.abort();
-  check((await call('browser_session',{operation:'start',browser:channel,headless:true},true,{signal:never.signal})).error?.code==='CANCELLED'&&!controller.browser.active,'a pre-cancelled request cannot launch a browser');
+  check((await call('browser_session',{operation:'start', connection:'isolated',browser:channel,headless:true},true,{signal:never.signal})).error?.code==='CANCELLED'&&!controller.browser.active,'a pre-cancelled request cannot launch a browser');
   process.stdout.write(`Browser lifecycle smoke passed ${checks} checks: real ${channel}; no evidence files saved.\n`);
 } finally {await controller.close();await fixture.close();}

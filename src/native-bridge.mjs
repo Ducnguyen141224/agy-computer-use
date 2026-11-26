@@ -33,7 +33,7 @@ export class NativeBridge extends EventEmitter {
       if (signal?.aborted) throw new BridgeError('CANCELLED', 'Request cancelled before execution.', { delivery: 'not_sent' });
       if (this.closed) throw new BridgeError('CLOSED', 'Desktop server is closed.');
       const readonly = method === 'system' && ['status','permissions','version','control_status','control_stop','control_resume','control_end','list_apps','list_displays','window_info','clipboard_get','list_surfaces','list_notifications','cursor_status'].includes(params.operation);
-      if (this.userStopped && (params.open === true || ['act','batch'].includes(method) || method === 'read' && params.operation === 'collect' || method === 'system' && !readonly || method === 'lease' && params.operation === 'begin')) throw new BridgeError('USER_STOPPED', 'Escape stopped control. Resume only after a new explicit user instruction.', { delivery: 'not_sent' });
+      if (this.userStopped && (params.open === true || ['act','batch'].includes(method) || method === 'read' && params.operation === 'collect' || method === 'system' && !readonly || ['lease','presentation'].includes(method) && params.operation === 'begin')) throw new BridgeError('USER_STOPPED', 'Escape stopped control. Resume only after a new explicit user instruction.', { delivery: 'not_sent' });
       return this.#send(method, params, signal).then(reply => {
         if (method === 'system' && params.operation === 'control_resume' && reply.ok) this.userStopped = false;
         if (method === 'system' && ['status','permissions','version','control_status'].includes(params.operation) && reply.ok && this.userStopped) { if (reply.data.control) reply.data.control.paused = true; else reply.data.paused = true; }

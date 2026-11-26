@@ -42,7 +42,7 @@ try {
   await client.connect(transport);
 
   // 1. Headless session + compact include_text:false snapshot timing & b1 refs
-  await call('browser_session', { operation: 'start', browser: channel, headless: true });
+  await call('browser_session', { operation: 'start', connection:'isolated', browser: channel, headless: true });
   const tab = await call('browser_tabs', { operation: 'new', url: `${fixture.url}/main?tab=Codex` });
   const t0 = performance.now();
   const snap = await call('browser_read', { tab_id: tab.tab_id, operation: 'snapshot', include_text: false, limit: 80 });
@@ -107,7 +107,7 @@ try {
   await call('browser_session', { operation: 'end' });
 
   // 6. Opt-in isolated persistent work profile across real browser restarts
-  const pStart1 = await call('browser_session', { operation: 'start', browser: channel, headless: true, profile: profileName });
+  const pStart1 = await call('browser_session', { operation: 'start', connection:'isolated', browser: channel, headless: true, profile: profileName });
   check(pStart1.persistent_profile === true && pStart1.personal_profile_attached === false && pStart1.tab_count === 0, `started isolated persistent profile '${profileName}' cleanly`);
   const pTab1 = await call('browser_tabs', { operation: 'new', url: `${cookieUrl}/login` });
   check((await call('browser_tabs', { operation: 'list' })).tabs.length === 1, 'persistent profile reuses starter page so tab_count stays 1');
@@ -117,7 +117,7 @@ try {
   const listed = await call('browser_session', { operation: 'list_profiles' });
   check(listed.profiles.includes(profileName), 'list_profiles reports saved isolated profile');
 
-  await call('browser_session', { operation: 'start', browser: channel, headless: true, profile: profileName });
+  await call('browser_session', { operation: 'start', connection:'isolated', browser: channel, headless: true, profile: profileName });
   const pTab2 = await call('browser_tabs', { operation: 'new', url: `${cookieUrl}/check` });
   const checkText = await call('browser_read', { tab_id: pTab2.tab_id, operation: 'text' });
   check(checkText.text.includes('Session persisted'), `real ${channel} persistent profile retained auth cookie across full browser restart`);
